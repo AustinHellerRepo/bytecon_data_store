@@ -175,7 +175,40 @@ impl ServerRequest {
                         return Ok(ServerRequest::HealthCheck);
                     },
                     1 => {
-                        todo!()
+                        if index + 4 > bytes_read_length {
+                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                                received_bytes_length: bytes_read_length,
+                                enum_variant_id,
+                                parsed_bytes_length: index + 4,
+                            }.into());
+                        }
+
+                        let bytes_length = usize::try_from(u32::from_le_bytes(buffer[index..index + 4].try_into()?))?;
+                        index += 4;
+
+                        if index + bytes_length > bytes_read_length {
+                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                                received_bytes_length: bytes_read_length,
+                                enum_variant_id,
+                                parsed_bytes_length: index + bytes_length,
+                            }.into());
+                        }
+
+                        let mut bytes = Vec::with_capacity(bytes_length);
+                        bytes.extend_from_slice(&buffer[index..index + bytes_length]);
+                        index += bytes_length;
+
+                        if index != bytes_read_length {
+                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                                received_bytes_length: bytes_read_length,
+                                enum_variant_id,
+                                parsed_bytes_length: index,
+                            }.into());
+                        }
+
+                        return Ok(ServerRequest::SendBytes {
+                            bytes,
+                        });
                     },
                     2 => {
                         todo!()
