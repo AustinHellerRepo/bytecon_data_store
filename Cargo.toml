@@ -1,9 +1,12 @@
 [package]
-name = "DataFunnel"
+name = "data_funnel"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 thiserror = { version = "1.0.66" }
-rusqlite = { version = "0.32.1" }
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 rand = { version = "0.8.5" }
+
+[dev-dependencies]
+tempfile = { version = "3.13.0" }

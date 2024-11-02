@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::PathBuf};
+use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use rand::Rng;
 use rusqlite::{params, Connection};
 use crate::DataStore;
@@ -12,36 +12,6 @@ pub struct DirectoryDataStore {
 
 impl DirectoryDataStore {
     pub fn new(sqlite_file_path: PathBuf, cache_filename_length: usize) -> Result<Self, DirectoryDataStoreError> {
-        let connection = Connection::open(&sqlite_file_path)
-            .map_err(|error| {
-                DirectoryDataStoreError::UnableToConnectToSqlitePath {
-                    sqlite_file_path: sqlite_file_path.clone(),
-                    error,
-                }
-            })?;
-
-        connection.execute("
-            CREATE TABLE IF NOT EXISTS file_record
-            (
-                file_id SERIAL INTEGER PRIMARY KEY,
-                file_path TEXT,
-                bytes_length INTEGER,
-            );
-        ", [])
-            .map_err(|error| {
-                DirectoryDataStoreError::UnableToCreateTablesWhenConstructingFreshStart {
-                    sqlite_file_path: sqlite_file_path.clone(),
-                    error,
-                }
-            })?;
-
-        connection.close()
-            .map_err(|(_, error)| {
-                DirectoryDataStoreError::FailedToCloseSqliteConnection {
-                    sqlite_file_path: sqlite_file_path.clone(),
-                    error,
-                }
-            })?;
 
         let storage_directory_path = {
             sqlite_file_path.parent()
@@ -63,9 +33,53 @@ impl DirectoryDataStore {
 }
 
 impl DataStore for DirectoryDataStore {
-    type Item = DirectoryDataStoreItem;
+    type Item = Vec<u8>;
     type Key = i64;
 
+    fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+        let connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        connection.execute("
+            CREATE TABLE IF NOT EXISTS file_record
+            (
+                file_id SERIAL INTEGER PRIMARY KEY,
+                file_path TEXT,
+                bytes_length INTEGER
+            );
+        ", [])
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToCreateTablesWhenConstructingFreshStart {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        connection.close()
+            .map_err(|(_, error)| {
+                DirectoryDataStoreError::FailedToCloseSqliteConnection {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+        
+        if !self.storage_directory_path.exists() {
+            std::fs::create_dir_all(&self.storage_directory_path)
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToCreateCacheDirectory {
+                        cache_directory_path: self.storage_directory_path.clone(),
+                        error,
+                    }
+                })?;
+        }
+
+        Ok(())
+    }
     fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
         let random_file_name = self.random.gen_filename(self.cache_filename_length);
         let random_file_path = self.storage_directory_path.append(random_file_name);
@@ -98,7 +112,7 @@ impl DataStore for DirectoryDataStore {
             INSERT INTO file_record
             (
                 file_path,
-                bytes_length,
+                bytes_length
             )
             VALUES
             (
@@ -107,7 +121,7 @@ impl DataStore for DirectoryDataStore {
             );
         ", (
             random_file_path.as_os_str().to_str(),
-            item.bytes.len(),
+            item.len(),
         ))
             .map_err(|error| {
                 DirectoryDataStoreError::FailedToInsertFileRecord {
@@ -127,10 +141,10 @@ impl DataStore for DirectoryDataStore {
                 }
             })?;
 
-        random_file.write_all(&item.bytes)
+        random_file.write_all(&item)
             .map_err(|error| {
                 DirectoryDataStoreError::FailedToWriteBytesToFile {
-                    bytes_length: item.bytes.len(),
+                    bytes_length: item.len(),
                     random_file_path: random_file_path.clone(),
                     error,
                 }
@@ -200,21 +214,7 @@ impl DataStore for DirectoryDataStore {
             bytes
         };
 
-        Ok(DirectoryDataStoreItem {
-            bytes,
-        })
-    }
-}
-
-pub struct DirectoryDataStoreItem {
-    bytes: Vec<u8>,
-}
-
-impl DirectoryDataStoreItem {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-        }
+        Ok(bytes)
     }
 }
 
@@ -282,39 +282,32 @@ pub enum DirectoryDataStoreError {
         cached_file_path: String,
         error: std::io::Error,
     },
+    #[error("Failed to create cache directory at {cache_directory_path} with error {error}.")]
+    FailedToCreateCacheDirectory {
+        cache_directory_path: PathBuf,
+        error: std::io::Error,
+    },
 }
 
-trait Appendable<T: AsRef<std::ffi::OsStr>> {
+trait Appendable<T: AsRef<Path>> {
     fn append(&self, appended: T) -> PathBuf;
 }
 
-impl<T: AsRef<std::ffi::OsStr>> Appendable<T> for &std::path::Path {
+impl<T: AsRef<Path>> Appendable<T> for &std::path::Path {
     fn append(&self, appended: T) -> PathBuf {
-        let self_os_string = self.as_os_str();
-        let mut append_os_string = OsString::new();
-        append_os_string.push(self_os_string);
-        append_os_string.push(appended);
-        append_os_string.into()
+        self.join(appended)
     }
 }
 
-impl<T: AsRef<std::ffi::OsStr>> Appendable<T> for PathBuf {
+impl<T: AsRef<Path>> Appendable<T> for PathBuf {
     fn append(&self, appended: T) -> PathBuf {
-        let self_os_string = self.as_os_str();
-        let mut append_os_string = OsString::new();
-        append_os_string.push(self_os_string);
-        append_os_string.push(appended);
-        append_os_string.into()
+        self.join(appended)
     }
 }
 
-impl<T: AsRef<std::ffi::OsStr>> Appendable<T> for &PathBuf {
+impl<T: AsRef<Path>> Appendable<T> for &PathBuf {
     fn append(&self, appended: T) -> PathBuf {
-        let self_os_string = self.as_os_str();
-        let mut append_os_string = OsString::new();
-        append_os_string.push(self_os_string);
-        append_os_string.push(appended);
-        append_os_string.into()
+        self.join(appended)
     }
 }
 
