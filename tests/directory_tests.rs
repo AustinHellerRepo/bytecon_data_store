@@ -17,8 +17,8 @@ mod directory_tests {
         ).expect("Failed to create new DirectoryDataStore.");
     }
 
-    #[test]
-    fn initialize_and_then_initialize_instance() {
+    #[tokio::test]
+    async fn initialize_and_then_initialize_instance() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
@@ -29,11 +29,12 @@ mod directory_tests {
         ).expect("Failed to create new DirectoryDataStore.");
 
         directory_data_store.initialize()
+            .await
             .expect("Failed to initialize DirectoryDataStore.");
     }
 
-    #[test]
-    fn store_file() {
+    #[tokio::test]
+    async fn store_bytes_and_retrieve_bytes() {
 
         // initialize DirectoryDataStore
 
@@ -47,30 +48,36 @@ mod directory_tests {
         ).expect("Failed to create new DirectoryDataStore.");
 
         directory_data_store.initialize()
+            .await
             .expect("Failed to initialize DirectoryDataStore.");
 
-        // store file
+        for j in 0..100 {
 
-        let mut bytes = Vec::new();
-        bytes.push(1);
-        bytes.push(2);
-        bytes.push(3);
-        bytes.push(4);
-        bytes.push(5);
-        bytes.push(6);
-        bytes.push(7);
-        bytes.push(8);
-        let id = directory_data_store.insert(bytes.clone())
-            .expect("Failed to insert into DirectoryDataStore.");
+            // store file
 
-        // pull out bytes
+            let mut bytes = Vec::new();
+            bytes.push(1 + j);
+            bytes.push(2 + j);
+            bytes.push(3 + j);
+            bytes.push(4 + j);
+            bytes.push(5 + j);
+            bytes.push(6 + j);
+            bytes.push(7 + j);
+            bytes.push(8 + j);
+            let id = directory_data_store.insert(bytes.clone())
+                .await
+                .expect("Failed to insert into DirectoryDataStore.");
 
-        let read_bytes = directory_data_store.get(&id)
-            .expect("Failed to read from DirectoryDataStore.");
+            // pull out bytes
 
-        assert_eq!(bytes.len(), read_bytes.len());
-        for i in 0..bytes.len() {
-            assert_eq!(bytes[i], read_bytes[i]);
+            let read_bytes = directory_data_store.get(&id)
+                .await
+                .expect("Failed to read from DirectoryDataStore.");
+
+            assert_eq!(bytes.len(), read_bytes.len());
+            for i in 0..bytes.len() {
+                assert_eq!(bytes[i], read_bytes[i]);
+            }
         }
     }
 }

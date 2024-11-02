@@ -1,6 +1,6 @@
 use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use rand::Rng;
-use rusqlite::{params, Connection};
+use rusqlite::{named_params, params, Connection};
 use crate::DataStore;
 
 pub struct DirectoryDataStore {
@@ -36,7 +36,7 @@ impl DataStore for DirectoryDataStore {
     type Item = Vec<u8>;
     type Key = i64;
 
-    fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+    async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
         let connection = Connection::open(&self.sqlite_file_path)
             .map_err(|error| {
                 DirectoryDataStoreError::UnableToConnectToSqlitePath {
@@ -48,7 +48,7 @@ impl DataStore for DirectoryDataStore {
         connection.execute("
             CREATE TABLE IF NOT EXISTS file_record
             (
-                file_id SERIAL INTEGER PRIMARY KEY,
+                file_record_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_path TEXT,
                 bytes_length INTEGER
             );
@@ -80,7 +80,7 @@ impl DataStore for DirectoryDataStore {
 
         Ok(())
     }
-    fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
+    async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
         let random_file_name = self.random.gen_filename(self.cache_filename_length);
         let random_file_path = self.storage_directory_path.append(random_file_name);
 
@@ -100,7 +100,7 @@ impl DataStore for DirectoryDataStore {
                 }
             })?;
 
-        let connection = Connection::open(&random_file_path)
+        let connection = Connection::open(&self.sqlite_file_path)
             .map_err(|error| {
                 DirectoryDataStoreError::UnableToConnectToSqlitePath {
                     sqlite_file_path: self.sqlite_file_path.clone(),
@@ -116,13 +116,13 @@ impl DataStore for DirectoryDataStore {
             )
             VALUES
             (
-                ?
-                , ?
+                :file_path
+                , :bytes_length
             );
-        ", (
-            random_file_path.as_os_str().to_str(),
-            item.len(),
-        ))
+        ", named_params! {
+            ":file_path": random_file_path.as_os_str().to_str(),
+            ":bytes_length": item.len(),
+        })
             .map_err(|error| {
                 DirectoryDataStoreError::FailedToInsertFileRecord {
                     random_file_path: random_file_path.clone(),
@@ -153,7 +153,7 @@ impl DataStore for DirectoryDataStore {
         Ok(file_record_id)
     }
 
-    fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
+    async fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
         
         let connection = Connection::open(&self.sqlite_file_path)
             .map_err(|error| {
@@ -169,7 +169,7 @@ impl DataStore for DirectoryDataStore {
                 , bytes_length
             FROM file_record
             WHERE
-                file_record = ?
+                file_record_id = :file_record_id;
         ")
             .map_err(|error| {
                 DirectoryDataStoreError::FailedToConstructStatement {
@@ -177,10 +177,10 @@ impl DataStore for DirectoryDataStore {
                     error,
                 }
             })?;
-        
-        let (file_path, bytes_length) = statement.query_row(params![
-            id
-        ], |row| {
+
+        let (file_path, bytes_length) = statement.query_row(named_params! {
+            ":file_record_id": *id,
+        }, |row| {
             let file_path: String = row.get(0)?;
             let bytes_length: usize = row.get(1)?;
             Ok((
@@ -191,6 +191,7 @@ impl DataStore for DirectoryDataStore {
             .map_err(|error| {
                 DirectoryDataStoreError::FailedToPullBackFileRecord {
                     sqlite_file_path: self.sqlite_file_path.clone(),
+                    id: *id,
                     error,
                 }
             })?;
@@ -267,9 +268,10 @@ pub enum DirectoryDataStoreError {
         sqlite_file_path: PathBuf,
         error: rusqlite::Error,
     },
-    #[error("Failed to pull back file_record row from Statement for {sqlite_file_path} with error {error}.")]
+    #[error("Failed to pull back file_record row from Statement for {sqlite_file_path} for ID {id} with error {error}.")]
     FailedToPullBackFileRecord {
         sqlite_file_path: PathBuf,
+        id: i64,
         error: rusqlite::Error,
     },
     #[error("Failed to open cached file at {cached_file_path} with error {error}.")]
