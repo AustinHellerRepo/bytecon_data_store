@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf, sync::Arc};
 
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 use tokio_rustls::{client::TlsStream, rustls::{Certificate, ClientConfig, RootCertStore, ServerName}, TlsConnector};
 
 use crate::DataStore;
@@ -54,8 +54,8 @@ impl RemoteDataStoreClient {
 
         Ok(tls_stream)
     }
-    fn send_request(&self, server_request: ServerRequest) {
-        
+    fn send_request(&self, server_request: ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
+        todo!()
     }
 }
 
@@ -64,13 +64,39 @@ impl DataStore for RemoteDataStoreClient {
     type Key = i64;
 
     async fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        todo!()
+        let health_check_response = self.send_request(ServerRequest::HealthCheck)?;
+        // getting back a response is good enough
+        Ok(())
     }
     async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn std::error::Error>> {
-        todo!()
+        let server_request = ServerRequest::SendBytes {
+            bytes: item,
+        };
+        let server_response = self.send_request(server_request.clone())?;
+        if let ServerResponse::SentBytes { id } = server_response {
+            Ok(id)
+        }
+        else {
+            Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                response: server_response,
+                request: server_request,
+            }.into())
+        }
     }
     async fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn std::error::Error>> {
-        todo!()
+        let server_request = ServerRequest::GetBytes {
+            id: *id,
+        };
+        let server_response = self.send_request(server_request.clone())?;
+        if let ServerResponse::ReceivedBytes { bytes } = server_response {
+            Ok(bytes)
+        }
+        else {
+            Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                response: server_response,
+                request: server_request,
+            }.into())
+        }
     }
 }
 
@@ -90,6 +116,7 @@ impl<TDataStore: DataStore> RemoteDataStoreServer<TDataStore> {
     }
 }
 
+#[derive(Clone, Debug)]
 enum ServerRequest {
     HealthCheck,
     SendBytes {
@@ -123,10 +150,48 @@ impl ServerRequest {
         Ok(())
     }
     async fn read_from_stream(tls_stream: &mut TlsStream<TcpStream>) -> Result<ServerRequest, Box<dyn Error>> {
-        todo!()
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+
+        loop {
+            let bytes_read_length = tls_stream.read(&mut chunk).await?;
+
+            if bytes_read_length == 0 {
+                // we are done reading, so begin parsing outcome
+                let mut index = 0;
+                let enum_variant_id = buffer[index];
+                index += 1;
+
+                match enum_variant_id {
+                    0 => {
+                        if index != bytes_read_length {
+                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                                received_bytes_length: bytes_read_length,
+                                enum_variant_id,
+                                parsed_bytes_length: index,
+                            }.into());
+                        }
+
+                        return Ok(ServerRequest::HealthCheck);
+                    },
+                    1 => {
+                        todo!()
+                    },
+                    2 => {
+                        todo!()
+                    },
+                    _ => {
+                        todo!()
+                    }
+                }
+            }
+
+            buffer.extend_from_slice(&chunk[..bytes_read_length]);
+        }
     }
 }
 
+#[derive(Debug)]
 enum ServerResponse {
     HealthCheck,
     SentBytes {
@@ -134,5 +199,20 @@ enum ServerResponse {
     },
     ReceivedBytes {
         bytes: Vec<u8>,
+    },
+}
+
+#[derive(thiserror::Error, Debug)]
+enum RemoteDataStoreError {
+    #[error("Unexpected response {response:?} based on request {request:?}.")]
+    UnexpectedResponseForRequest {
+        response: ServerResponse,
+        request: ServerRequest,
+    },
+    #[error("Unexpected number of bytes received {received_bytes_length} after parsing the enum variant ID {enum_variant_id} based on {parsed_bytes_length} bytes.")]
+    UnexpectedNumberOfBytesParsed {
+        received_bytes_length: usize,
+        enum_variant_id: u8,
+        parsed_bytes_length: usize,
     },
 }
