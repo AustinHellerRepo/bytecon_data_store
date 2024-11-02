@@ -1,7 +1,6 @@
-use std::{error::Error, ffi::OsString, fs::File, io::Write, path::PathBuf};
+use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::PathBuf};
 use rand::Rng;
-use rusqlite::Connection;
-
+use rusqlite::{params, Connection};
 use crate::DataStore;
 
 pub struct DirectoryDataStore {
@@ -141,7 +140,69 @@ impl DataStore for DirectoryDataStore {
     }
 
     fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
-        todo!()
+        
+        let connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let mut statement = connection.prepare("
+            SELECT
+                file_path
+                , bytes_length
+            FROM file_record
+            WHERE
+                file_record = ?
+        ")
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToConstructStatement {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+        
+        let (file_path, bytes_length) = statement.query_row(params![
+            id
+        ], |row| {
+            let file_path: String = row.get(0)?;
+            let bytes_length: usize = row.get(1)?;
+            Ok((
+                file_path,
+                bytes_length,
+            ))
+        })
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToPullBackFileRecord {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+        
+        let bytes = {
+            let mut bytes: Vec<u8> = Vec::with_capacity(bytes_length);
+            let mut file = File::open(&file_path)
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToOpenCachedFileRecord {
+                        cached_file_path: file_path.clone(),
+                        error,
+                    }
+                })?;
+            file.read_to_end(&mut bytes)
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToReadFromCachedFile {
+                        cached_file_path: file_path.clone(),
+                        error,
+                    }
+                })?;
+            bytes
+        };
+
+        Ok(DirectoryDataStoreItem {
+            bytes,
+        })
     }
 }
 
@@ -199,6 +260,26 @@ pub enum DirectoryDataStoreError {
     FailedToWriteBytesToFile {
         bytes_length: usize,
         random_file_path: PathBuf,
+        error: std::io::Error,
+    },
+    #[error("Failed to construct rusqlite Statement instance for {sqlite_file_path} with error {error}.")]
+    FailedToConstructStatement {
+        sqlite_file_path: PathBuf,
+        error: rusqlite::Error,
+    },
+    #[error("Failed to pull back file_record row from Statement for {sqlite_file_path} with error {error}.")]
+    FailedToPullBackFileRecord {
+        sqlite_file_path: PathBuf,
+        error: rusqlite::Error,
+    },
+    #[error("Failed to open cached file at {cached_file_path} with error {error}.")]
+    FailedToOpenCachedFileRecord {
+        cached_file_path: String,
+        error: std::io::Error,
+    },
+    #[error("Failed to read from cached file at {cached_file_path} with error {error}.")]
+    FailedToReadFromCachedFile {
+        cached_file_path: String,
         error: std::io::Error,
     },
 }
