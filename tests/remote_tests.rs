@@ -14,7 +14,10 @@ mod remote_tests {
         let cache_filename_length: usize = 10;
 
         let mut server_public_key_tempfile = tempfile::NamedTempFile::new().unwrap();
+        println!("public key: {:?}", server_public_key_tempfile.path());
+
         let mut server_private_key_tempfile = tempfile::NamedTempFile::new().unwrap();
+        println!("private key: {:?}", server_private_key_tempfile.path());
 
         // generate self-signed keys
         let (public_key_bytes, private_key_bytes) = {
@@ -91,8 +94,5 @@ mod remote_tests {
         assert_eq!(2, bytes[1]);
         assert_eq!(3, bytes[2]);
         assert_eq!(4, bytes[3]);
-
-        server_task.abort();
-        server_task.await.unwrap();
     }
 }

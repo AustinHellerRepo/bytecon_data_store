@@ -1,9 +1,56 @@
 use std::{error::Error, path::PathBuf, sync::Arc};
-
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 use tokio_rustls::{rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig, ServerName}, TlsAcceptor, TlsConnector, TlsStream};
-
 use crate::DataStore;
+
+struct TlsStreamWrapper(TlsStream<TcpStream>);
+
+impl TlsStreamWrapper {
+    async fn read_all_bytes(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 64];
+
+        let mut initial_packet = [0u8; 8];
+        let mut read_bytes_length = self.0.read_exact(&mut initial_packet)
+            .await?;
+
+        println!("Read exact initial packet: {:?}", initial_packet);
+
+        let expected_bytes_length: u64 = u64::from_le_bytes(initial_packet);
+
+        println!("Expected bytes over TlsStream: {}", expected_bytes_length);
+        
+        while (bytes.len() as u64) < expected_bytes_length {
+            read_bytes_length = self.0.read(&mut chunk)
+                .await?;
+
+            println!("Read chunk packet: {:?}", chunk);
+
+            if read_bytes_length != 0 {
+                bytes.extend_from_slice(&chunk[..read_bytes_length]);
+            }
+        }
+
+        Ok(bytes)
+    }
+    async fn write_all_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Box<dyn Error>> {
+        let bytes_length: u64 = bytes.len() as u64;
+
+        let bytes_length_bytes = bytes_length.to_le_bytes();
+
+        println!("Write exact initial packet: {:?}", bytes_length_bytes);
+
+        self.0.write(&bytes_length_bytes)
+            .await?;
+
+        println!("Write chunked packets: {:?}", bytes);
+
+        self.0.write(&bytes)
+            .await?;
+
+        Ok(())
+    }
+}
 
 pub struct RemoteDataStoreClient {
     server_public_key_file_path: PathBuf,
@@ -26,7 +73,7 @@ impl RemoteDataStoreClient {
             server_port,
         }
     }
-    async fn connect(&self) -> Result<TlsStream<TcpStream>, Box<dyn Error>> {
+    async fn connect(&self) -> Result<TlsStreamWrapper, Box<dyn Error>> {
         // load TLS client configuration
         let config = {
             let cert_file = std::fs::File::open(&self.server_public_key_file_path)?;
@@ -52,15 +99,18 @@ impl RemoteDataStoreClient {
         let server_name = ServerName::try_from(self.server_domain.as_str())?;
         let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
-        Ok(TlsStream::Client(tls_stream))
+        Ok(TlsStreamWrapper(TlsStream::Client(tls_stream)))
     }
     async fn send_request(&self, server_request: ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
-        let mut tls_stream = self.connect()
+        let mut tls_stream_wrapper = self.connect()
             .await?;
-        server_request.write_to_stream(&mut tls_stream)
+        server_request.write_to_stream(&mut tls_stream_wrapper)
             .await?;
-        let server_response = ServerResponse::read_from_stream(&mut tls_stream)
+        let server_response = ServerResponse::read_from_stream(&mut tls_stream_wrapper)
             .await?;
+        
+        println!("Read server response: {:?}", server_response);
+
         return Ok(server_response);
     }
 }
@@ -171,13 +221,19 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
 
             match tls_acceptor.accept(tcp_stream).await {
                 Ok(stream) => {
-                    let mut tls_stream = TlsStream::Server(stream);
-                    let server_request = ServerRequest::read_from_stream(&mut tls_stream)
+
+                    println!("Received connection on server from client.");
+
+                    let mut tls_stream_wrapper = TlsStreamWrapper(TlsStream::Server(stream));
+                    let server_request = ServerRequest::read_from_stream(&mut tls_stream_wrapper)
                         .await?;
+
+                    println!("Read server request on server from client: {:?}", server_request);
+
                     match server_request {
                         ServerRequest::HealthCheck => {
                             let server_response = ServerResponse::HealthCheck;
-                            server_response.write_to_stream(&mut tls_stream)
+                            server_response.write_to_stream(&mut tls_stream_wrapper)
                                 .await?;
                         },
                         ServerRequest::SendBytes { bytes } => {
@@ -185,20 +241,26 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                                 .insert(bytes)
                                 .await
                                 .expect("Failed to insert into internal DataStore.");
+
+                            println!("Sending to client key {}", key);
+
                             let server_response = ServerResponse::SentBytes {
                                 id: key,
                             };
-                            server_response.write_to_stream(&mut tls_stream)
+                            server_response.write_to_stream(&mut tls_stream_wrapper)
                                 .await?;
                         },
                         ServerRequest::GetBytes { id } => {
                             let bytes = self.data_store
                                 .get(&id)
                                 .await?;
+
+                            println!("Sending to client bytes {:?}", bytes);
+
                             let server_response = ServerResponse::ReceivedBytes {
                                 bytes,
                             };
-                            server_response.write_to_stream(&mut tls_stream)
+                            server_response.write_to_stream(&mut tls_stream_wrapper)
                                 .await?;
                         },
                     }
@@ -208,12 +270,14 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                 }
             }
         }
+
+        panic!("Unexpected break from loop.");
     }
 }
 
 trait StreamReaderWriter {
-    async fn write_to_stream(&self, tls_stream: &mut TlsStream<TcpStream>) -> Result<(), Box<dyn Error>>;
-    async fn read_from_stream(tls_stream: &mut TlsStream<TcpStream>) -> Result<Self, Box<dyn Error>> where Self: Sized;
+    async fn write_to_stream(&self, tls_stream: &mut TlsStreamWrapper) -> Result<(), Box<dyn Error>>;
+    async fn read_from_stream(tls_stream: &mut TlsStreamWrapper) -> Result<Self, Box<dyn Error>> where Self: Sized;
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +292,7 @@ enum ServerRequest {
 }
 
 impl StreamReaderWriter for ServerRequest {
-    async fn write_to_stream(&self, tls_stream: &mut TlsStream<TcpStream>) -> Result<(), Box<dyn Error>> {
+    async fn write_to_stream(&self, tls_stream_wrapper: &mut TlsStreamWrapper) -> Result<(), Box<dyn Error>> {
         let mut sending_bytes: Vec<u8> = Vec::new();
         
         match self {
@@ -245,95 +309,101 @@ impl StreamReaderWriter for ServerRequest {
                 sending_bytes.extend_from_slice(&id.to_le_bytes());
             },
         }
-        tls_stream.write_all(&sending_bytes).await?;
+        tls_stream_wrapper.write_all_bytes(sending_bytes).await?;
 
         Ok(())
     }
-    async fn read_from_stream(tls_stream: &mut TlsStream<TcpStream>) -> Result<ServerRequest, Box<dyn Error>> {
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 1024];
+    async fn read_from_stream(tls_stream_wrapper: &mut TlsStreamWrapper) -> Result<ServerRequest, Box<dyn Error>> {
 
-        loop {
-            let bytes_read_length = tls_stream.read(&mut chunk).await?;
+        // read all bytes from the TlsStreamWrapper
+        let bytes = tls_stream_wrapper.read_all_bytes()
+            .await?;
+        let bytes_length = bytes.len();
 
-            if bytes_read_length == 0 {
-                // we are done reading, so begin parsing outcome
-                let mut index = 0;
-                let enum_variant_id = buffer[index];
-                index += 1;
+        println!("Read {} bytes from client.", bytes_length);
 
-                match enum_variant_id {
-                    0 => {
-                        if index != bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index,
-                            }.into());
-                        }
+        // we are done reading, so begin parsing outcome
+        let mut index = 0;
+        let enum_variant_id = bytes[index];
+        index += 1;
 
-                        return Ok(ServerRequest::HealthCheck);
-                    },
-                    1 => {
-                        if index + 4 > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + 4,
-                            }.into());
-                        }
-
-                        let bytes_length = usize::try_from(u32::from_le_bytes(buffer[index..index + 4].try_into()?))?;
-                        index += 4;
-
-                        if index + bytes_length > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + bytes_length,
-                            }.into());
-                        }
-
-                        let mut bytes = Vec::with_capacity(bytes_length);
-                        bytes.extend_from_slice(&buffer[index..index + bytes_length]);
-                        index += bytes_length;
-
-                        if index != bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index,
-                            }.into());
-                        }
-
-                        return Ok(ServerRequest::SendBytes {
-                            bytes,
-                        });
-                    },
-                    2 => {
-                        if index + 8 > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + 8,
-                            }.into());
-                        }
-
-                        let id = i64::from_le_bytes(buffer[..8].try_into()?);
-
-                        return Ok(ServerRequest::GetBytes {
-                            id,
-                        });
-                    },
-                    _ => {
-                        return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
-                            variant_byte: enum_variant_id,
-                        }.into());
-                    }
+        match enum_variant_id {
+            0 => {
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
                 }
-            }
 
-            buffer.extend_from_slice(&chunk[..bytes_read_length]);
+                return Ok(ServerRequest::HealthCheck);
+            },
+            1 => {
+                if index + 4 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 4,
+                    }.into());
+                }
+
+                let server_request_bytes_length = usize::try_from(u32::from_le_bytes(bytes[index..index + 4].try_into()?))?;
+                index += 4;
+
+                if index + server_request_bytes_length > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + server_request_bytes_length,
+                    }.into());
+                }
+
+                let mut server_request_bytes = Vec::with_capacity(server_request_bytes_length);
+                server_request_bytes.extend_from_slice(&bytes[index..index + server_request_bytes_length]);
+                index += server_request_bytes_length;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerRequest::SendBytes {
+                    bytes: server_request_bytes,
+                });
+            },
+            2 => {
+                if index + 8 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 8,
+                    }.into());
+                }
+
+                let id = i64::from_le_bytes(bytes[index..index + 8].try_into()?);
+                index += 8;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerRequest::GetBytes {
+                    id,
+                });
+            },
+            _ => {
+                return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
+                    variant_byte: enum_variant_id,
+                }.into());
+            }
         }
     }
 }
@@ -350,7 +420,7 @@ enum ServerResponse {
 }
 
 impl StreamReaderWriter for ServerResponse {
-    async fn write_to_stream(&self, tls_stream: &mut TlsStream<TcpStream>) -> Result<(), Box<dyn Error>> {
+    async fn write_to_stream(&self, tls_stream_wrapper: &mut TlsStreamWrapper) -> Result<(), Box<dyn Error>> {
         let mut sending_bytes: Vec<u8> = Vec::new();
         
         match self {
@@ -367,95 +437,97 @@ impl StreamReaderWriter for ServerResponse {
                 sending_bytes.extend_from_slice(&id.to_le_bytes());
             }
         }
-        tls_stream.write_all(&sending_bytes).await?;
+        tls_stream_wrapper.write_all_bytes(sending_bytes).await?;
 
         Ok(())
     }
-    async fn read_from_stream(tls_stream: &mut TlsStream<TcpStream>) -> Result<ServerResponse, Box<dyn Error>> {
-        let mut buffer = Vec::new();
-        let mut chunk = [0u8; 1024];
+    async fn read_from_stream(tls_stream_wrapper: &mut TlsStreamWrapper) -> Result<ServerResponse, Box<dyn Error>> {
+        let bytes = tls_stream_wrapper.read_all_bytes()
+            .await?;
+        let bytes_length = bytes.len();
 
-        loop {
-            let bytes_read_length = tls_stream.read(&mut chunk).await?;
+        // we are done reading, so begin parsing outcome
+        let mut index = 0;
+        let enum_variant_id = bytes[index];
+        index += 1;
 
-            if bytes_read_length == 0 {
-                // we are done reading, so begin parsing outcome
-                let mut index = 0;
-                let enum_variant_id = buffer[index];
-                index += 1;
-
-                match enum_variant_id {
-                    0 => {
-                        if index != bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index,
-                            }.into());
-                        }
-
-                        return Ok(ServerResponse::HealthCheck);
-                    },
-                    1 => {
-                        if index + 4 > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + 4,
-                            }.into());
-                        }
-
-                        let bytes_length = usize::try_from(u32::from_le_bytes(buffer[index..index + 4].try_into()?))?;
-                        index += 4;
-
-                        if index + bytes_length > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + bytes_length,
-                            }.into());
-                        }
-
-                        let mut bytes = Vec::with_capacity(bytes_length);
-                        bytes.extend_from_slice(&buffer[index..index + bytes_length]);
-                        index += bytes_length;
-
-                        if index != bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index,
-                            }.into());
-                        }
-
-                        return Ok(ServerResponse::ReceivedBytes {
-                            bytes,
-                        });
-                    },
-                    2 => {
-                        if index + 8 > bytes_read_length {
-                            return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
-                                received_bytes_length: bytes_read_length,
-                                enum_variant_id,
-                                parsed_bytes_length: index + 8,
-                            }.into());
-                        }
-
-                        let id = i64::from_le_bytes(buffer[..8].try_into()?);
-
-                        return Ok(ServerResponse::SentBytes {
-                            id,
-                        });
-                    },
-                    _ => {
-                        return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
-                            variant_byte: enum_variant_id,
-                        }.into());
-                    }
+        match enum_variant_id {
+            0 => {
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
                 }
-            }
 
-            buffer.extend_from_slice(&chunk[..bytes_read_length]);
+                return Ok(ServerResponse::HealthCheck);
+            },
+            1 => {
+                if index + 4 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 4,
+                    }.into());
+                }
+
+                let server_response_bytes_length = usize::try_from(u32::from_le_bytes(bytes[index..index + 4].try_into()?))?;
+                index += 4;
+
+                if index + server_response_bytes_length > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + server_response_bytes_length,
+                    }.into());
+                }
+
+                let mut server_response_bytes = Vec::with_capacity(server_response_bytes_length);
+                server_response_bytes.extend_from_slice(&bytes[index..index + server_response_bytes_length]);
+                index += server_response_bytes_length;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerResponse::ReceivedBytes {
+                    bytes: server_response_bytes,
+                });
+            },
+            2 => {
+                if index + 8 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 8,
+                    }.into());
+                }
+
+                let id = i64::from_le_bytes(bytes[index..index + 8].try_into()?);
+                index += 8;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerResponse::SentBytes {
+                    id,
+                });
+            },
+            _ => {
+                return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
+                    variant_byte: enum_variant_id,
+                }.into());
+            }
         }
     }
 }
