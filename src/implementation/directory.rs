@@ -1,7 +1,7 @@
 use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
+use crate::DataStore;
 use rand::{Rng, SeedableRng};
 use rusqlite::{named_params, Connection};
-use crate::DataStore;
 
 pub struct DirectoryDataStore {
     sqlite_file_path: PathBuf,
@@ -152,7 +152,6 @@ impl DataStore for DirectoryDataStore {
 
         Ok(file_record_id)
     }
-
     async fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
         
         let connection = Connection::open(&self.sqlite_file_path)
@@ -216,6 +215,80 @@ impl DataStore for DirectoryDataStore {
         };
 
         Ok(bytes)
+    }
+    async fn delete(&self, id: &Self::Key) -> Result<(), Box<dyn Error>> {
+        
+        let mut connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let transaction = connection.transaction()
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToCreateTransaction {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let mut statement = transaction.prepare("
+            SELECT
+                file_path
+            FROM file_record
+            WHERE
+                file_record_id = :file_record_id;
+        ")
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToConstructStatement {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let file_path = statement.query_row(named_params! {
+            ":file_record_id": *id,
+        }, |row| {
+            let file_path: String = row.get(0)?;
+            Ok(file_path)
+        })
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToPullBackFileRecord {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    id: *id,
+                    error,
+                }
+            })?;
+        
+        let path = Path::new(&file_path);
+        if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToDeleteFileAtPath {
+                        file_path: file_path.into(),
+                        error,
+                    }
+                })?;
+        }
+
+        transaction.execute("
+            DELETE FROM file_record
+            WHERE
+                file_record_id = :file_record_id;
+        ", named_params! {
+            ":file_record_id": *id,
+        })
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToDeleteFileRecord {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    id: *id,
+                    error,
+                }
+            })?;
+
+        Ok(())
     }
 }
 
@@ -287,6 +360,22 @@ pub enum DirectoryDataStoreError {
     #[error("Failed to create cache directory at {cache_directory_path} with error {error}.")]
     FailedToCreateCacheDirectory {
         cache_directory_path: PathBuf,
+        error: std::io::Error,
+    },
+    #[error("Failed to delete file_record row for {sqlite_file_path} with ID {id} with error {error}.")]
+    FailedToDeleteFileRecord {
+        sqlite_file_path: PathBuf,
+        id: i64,
+        error: rusqlite::Error,
+    },
+    #[error("Unable to create transaction from Sqlite connection for {sqlite_file_path} with error {error}.")]
+    UnableToCreateTransaction {
+        sqlite_file_path: PathBuf,
+        error: rusqlite::Error,
+    },
+    #[error("Failed to delete file based on file_record path {file_path} with error {error}.")]
+    FailedToDeleteFileAtPath {
+        file_path: PathBuf,
         error: std::io::Error,
     },
 }

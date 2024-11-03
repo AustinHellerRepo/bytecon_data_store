@@ -3,17 +3,22 @@ name = "data_funnel"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+directory = ["rusqlite", "rand"]
+remote = ["tokio", "tokio-rustls", "rustls", "rustls-pemfile", "chrono"]
+
 [dependencies]
 thiserror = { version = "1.0.66" }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
-rand = { version = "0.8.5" }
-tokio = { version = "1", features = ["full"] }
-tokio-rustls = { version = "0.23" }
-rustls = { version = "0.21" }
+rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
+rand = { version = "0.8.5", optional = true  }
+tokio = { version = "1", features = ["full"], optional = true  }
+tokio-rustls = { version = "0.23", optional = true  }
+rustls = { version = "0.21", optional = true  }
 #zstd = { version = "0.11" }
 #bytes = { version = "1.2" }
-rustls-pemfile = { version = "1.0" }
-chrono = { version = "0.4.38" }
+rustls-pemfile = { version = "1.0", optional = true  }
+chrono = { version = "0.4.38", optional = true  }
 
 [dev-dependencies]
 tempfile = { version = "3.13.0" }

@@ -1,8 +1,9 @@
 #[cfg(test)]
+#[cfg(feature = "directory")]
 mod directory_tests {
     use std::path::PathBuf;
-
     use data_funnel::{implementation::directory::DirectoryDataStore, DataStore};
+    use rand::{seq::SliceRandom, SeedableRng};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -34,7 +35,7 @@ mod directory_tests {
     }
 
     #[tokio::test]
-    async fn store_bytes_and_retrieve_bytes() {
+    async fn store_bytes_and_retrieve_bytes_and_delete_bytes() {
 
         // initialize DirectoryDataStore
 
@@ -50,6 +51,8 @@ mod directory_tests {
         directory_data_store.initialize()
             .await
             .expect("Failed to initialize DirectoryDataStore.");
+
+        let mut ids = Vec::new();
 
         for j in 0..100 {
 
@@ -78,6 +81,17 @@ mod directory_tests {
             for i in 0..bytes.len() {
                 assert_eq!(bytes[i], read_bytes[i]);
             }
+
+            ids.push(id);
+        }
+
+        let mut random = rand::rngs::StdRng::from_entropy();
+        ids.shuffle(&mut random);
+
+        for id in ids {
+            directory_data_store.delete(&id)
+                .await
+                .expect(&format!("Failed to delete for ID {}", id));
         }
     }
 }

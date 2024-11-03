@@ -1,5 +1,5 @@
-use std::{error::Error, path::PathBuf, sync::Arc};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
+use std::{error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::Mutex};
 use tokio_rustls::{rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig, ServerName}, TlsAcceptor, TlsConnector, TlsStream};
 use crate::DataStore;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -168,10 +168,38 @@ impl DataStore for RemoteDataStoreClient {
             }.into())
         }
     }
+    async fn delete(&self, id: &Self::Key) -> Result<(), Box<dyn std::error::Error>> {
+        
+        // copy key into owned object
+        let id = *id;
+
+        let server_request = ServerRequest::Delete {
+            id: id,
+        };
+        let server_response = self.send_request(server_request.clone())
+            .await?;
+        if let ServerResponse::Deleted { id: response_file_record_id } = server_response {
+            if id != response_file_record_id {
+                Err(RemoteDataStoreError::DeleteMismatch {
+                    request_file_record_id: id,
+                    response_file_record_id,
+                }.into())
+            }
+            else {
+                Ok(())
+            }
+        }
+        else {
+            Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                response: server_response,
+                request: server_request,
+            }.into())
+        }
+    }
 }
 
 pub struct RemoteDataStoreServer<TDataStore: DataStore> {
-    data_store: TDataStore,
+    data_store: Arc<Mutex<TDataStore>>,
     public_key_file_path: PathBuf,
     private_key_file_path: PathBuf,
     bind_address: String,
@@ -187,7 +215,7 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
         bind_port: u16
     ) -> Self {
         Self {
-            data_store: data_store,
+            data_store: Arc::new(Mutex::new(data_store)),
             public_key_file_path,
             private_key_file_path,
             bind_address,
@@ -227,53 +255,89 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
         loop {
             let (tcp_stream, client_address) = listener.accept().await?;
             let tls_acceptor = tls_acceptor.clone();
+            let data_store = self.data_store.clone();
 
             println!("{}: received connection from {}", chrono::Utc::now(), client_address);
 
-            match tls_acceptor.accept(tcp_stream).await {
-                Ok(stream) => {
+            let _process_task = tokio::spawn(async move {
 
-                    let mut tls_stream_wrapper = TlsStreamWrapper(TlsStream::Server(stream));
-                    let server_request = ServerRequest::read_from_stream(&mut tls_stream_wrapper)
-                        .await?;
+                async fn process_function<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static>(client_address: SocketAddr, data_store: Arc<Mutex<TDataStore>>, tcp_stream: TcpStream, tls_acceptor: TlsAcceptor) -> Result<(), Box<dyn Error>> {
+                    match tls_acceptor.accept(tcp_stream).await {
+                        Ok(stream) => {
 
-                    match server_request {
-                        ServerRequest::HealthCheck { nonce } => {
-                            let server_response = ServerResponse::HealthCheck {
-                                nonce,
-                            };
-                            server_response.write_to_stream(&mut tls_stream_wrapper)
+                            let mut tls_stream_wrapper = TlsStreamWrapper(TlsStream::Server(stream));
+                            let server_request = ServerRequest::read_from_stream(&mut tls_stream_wrapper)
                                 .await?;
+
+                            match server_request {
+                                ServerRequest::HealthCheck { nonce } => {
+                                    let server_response = ServerResponse::HealthCheck {
+                                        nonce,
+                                    };
+                                    server_response.write_to_stream(&mut tls_stream_wrapper)
+                                        .await?;
+                                    Ok(())
+                                },
+                                ServerRequest::SendBytes { bytes } => {
+                                    let key = data_store
+                                        .lock()
+                                        .await
+                                        .insert(bytes)
+                                        .await?;
+
+                                    let server_response = ServerResponse::SentBytes {
+                                        id: key,
+                                    };
+                                    server_response.write_to_stream(&mut tls_stream_wrapper)
+                                        .await?;
+                                    Ok(())
+                                },
+                                ServerRequest::GetBytes { id } => {
+                                    let bytes = data_store
+                                        .lock()
+                                        .await
+                                        .get(&id)
+                                        .await?;
+
+                                    let server_response = ServerResponse::ReceivedBytes {
+                                        bytes,
+                                    };
+                                    server_response.write_to_stream(&mut tls_stream_wrapper)
+                                        .await?;
+                                    Ok(())
+                                },
+                                ServerRequest::Delete { id } => {
+                                    data_store
+                                        .lock()
+                                        .await
+                                        .delete(&id)
+                                        .await?;
+
+                                    let server_response = ServerResponse::Deleted {
+                                        id,
+                                    };
+                                    server_response.write_to_stream(&mut tls_stream_wrapper)
+                                        .await?;
+                                    Ok(())
+                                }
+                            }
                         },
-                        ServerRequest::SendBytes { bytes } => {
-                            let key = self.data_store
-                                .insert(bytes)
-                                .await
-                                .expect("Failed to insert into internal DataStore.");
-
-                            let server_response = ServerResponse::SentBytes {
-                                id: key,
-                            };
-                            server_response.write_to_stream(&mut tls_stream_wrapper)
-                                .await?;
-                        },
-                        ServerRequest::GetBytes { id } => {
-                            let bytes = self.data_store
-                                .get(&id)
-                                .await?;
-
-                            let server_response = ServerResponse::ReceivedBytes {
-                                bytes,
-                            };
-                            server_response.write_to_stream(&mut tls_stream_wrapper)
-                                .await?;
-                        },
+                        Err(e) => {
+                            eprintln!("{}: failed to accept TLS connection from client {} with error {:?}.", chrono::Utc::now(), client_address, e);
+                            Err(e.into())
+                        }
                     }
-                },
-                Err(e) => {
-                    eprintln!("Failed to accept TLS connection: {:?}", e);
                 }
-            }
+
+                match process_function(client_address, data_store, tcp_stream, tls_acceptor).await {
+                    Ok(_) => {
+                        println!("{}: processed request from client {}.", chrono::Utc::now(), client_address);
+                    },
+                    Err(error) => {
+                        eprintln!("{}: failed to process request from client {} with error {:?}.", chrono::Utc::now(), client_address, error);
+                    }
+                }
+            });
         }
     }
 }
@@ -294,6 +358,9 @@ enum ServerRequest {
     GetBytes {
         id: i64,
     },
+    Delete {
+        id: i64,
+    },
 }
 
 impl StreamReaderWriter for ServerRequest {
@@ -312,6 +379,10 @@ impl StreamReaderWriter for ServerRequest {
             },
             ServerRequest::GetBytes { id } => {
                 sending_bytes.push(2);
+                sending_bytes.extend_from_slice(&id.to_le_bytes());
+            },
+            ServerRequest::Delete { id } => {
+                sending_bytes.push(3);
                 sending_bytes.extend_from_slice(&id.to_le_bytes());
             },
         }
@@ -416,6 +487,30 @@ impl StreamReaderWriter for ServerRequest {
                     id,
                 });
             },
+            3 => {
+                if index + 8 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 8,
+                    }.into());
+                }
+
+                let id = i64::from_le_bytes(bytes[index..index + 8].try_into()?);
+                index += 8;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerRequest::Delete {
+                    id,
+                });
+            },
             _ => {
                 return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
                     variant_byte: enum_variant_id,
@@ -436,6 +531,9 @@ enum ServerResponse {
     ReceivedBytes {
         bytes: Vec<u8>,
     },
+    Deleted {
+        id: i64,
+    },
 }
 
 impl StreamReaderWriter for ServerResponse {
@@ -455,7 +553,11 @@ impl StreamReaderWriter for ServerResponse {
             ServerResponse::SentBytes { id } => {
                 sending_bytes.push(2);
                 sending_bytes.extend_from_slice(&id.to_le_bytes());
-            }
+            },
+            ServerResponse::Deleted { id } => {
+                sending_bytes.push(3);
+                sending_bytes.extend_from_slice(&id.to_le_bytes());
+            },
         }
         tls_stream_wrapper.write_all_bytes(sending_bytes).await?;
 
@@ -556,6 +658,30 @@ impl StreamReaderWriter for ServerResponse {
                     id,
                 });
             },
+            3 => {
+                if index + 8 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 8,
+                    }.into());
+                }
+
+                let id = i64::from_le_bytes(bytes[index..index + 8].try_into()?);
+                index += 8;
+
+                if index != bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index,
+                    }.into());
+                }
+
+                return Ok(ServerResponse::Deleted {
+                    id,
+                });
+            },
             _ => {
                 return Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
                     variant_byte: enum_variant_id,
@@ -586,5 +712,10 @@ enum RemoteDataStoreError {
     NonceMismatch {
         response_nonce: u128,
         request_nonce: u128,
+    },
+    #[error("Unexpected deleted ID mismatch from request {request_file_record_id} and response {response_file_record_id}.")]
+    DeleteMismatch {
+        request_file_record_id: i64,
+        response_file_record_id: i64,
     },
 }

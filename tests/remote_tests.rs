@@ -1,8 +1,9 @@
 #[cfg(test)]
+#[cfg(feature = "remote")]
 mod remote_tests {
     use std::{io::Write, path::PathBuf, time::Duration};
-
     use data_funnel::{implementation::{directory::DirectoryDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
+    use rand::{seq::SliceRandom, SeedableRng};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use tempfile::NamedTempFile;
     use tokio::time::sleep;
@@ -81,6 +82,8 @@ mod remote_tests {
             .await
             .expect("Failed to initialize client.");
 
+        let mut ids = Vec::new();
+
         for j in 0..100 {
         
             let id = client.insert(vec![
@@ -101,6 +104,17 @@ mod remote_tests {
             assert_eq!(2 + j, bytes[1]);
             assert_eq!(3 + j, bytes[2]);
             assert_eq!(4 + j, bytes[3]);
+
+            ids.push(id);
+        }
+
+        let mut random = rand::rngs::StdRng::from_entropy();
+        ids.shuffle(&mut random);
+
+        for id in ids {
+            client.delete(&id)
+                .await
+                .expect(&format!("Failed to delete ID {}", id));
         }
     }
 }
