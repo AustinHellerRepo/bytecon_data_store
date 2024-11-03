@@ -11,7 +11,7 @@ mod directory_tests {
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
         
-        let directory_data_store = DirectoryDataStore::new(
+        let _directory_data_store = DirectoryDataStore::new(
             sqlite_file_path,
             cache_filename_length,
         ).expect("Failed to create new DirectoryDataStore.");

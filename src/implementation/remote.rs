@@ -2,6 +2,7 @@ use std::{error::Error, path::PathBuf, sync::Arc};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
 use tokio_rustls::{rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig, ServerName}, TlsAcceptor, TlsConnector, TlsStream};
 use crate::DataStore;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 struct TlsStreamWrapper(TlsStream<TcpStream>);
 
@@ -11,20 +12,13 @@ impl TlsStreamWrapper {
         let mut chunk = [0u8; 64];
 
         let mut initial_packet = [0u8; 8];
-        let mut read_bytes_length = self.0.read_exact(&mut initial_packet)
+        let _ = self.0.read_exact(&mut initial_packet)
             .await?;
 
-        println!("Read exact initial packet: {:?}", initial_packet);
-
         let expected_bytes_length: u64 = u64::from_le_bytes(initial_packet);
-
-        println!("Expected bytes over TlsStream: {}", expected_bytes_length);
-        
         while (bytes.len() as u64) < expected_bytes_length {
-            read_bytes_length = self.0.read(&mut chunk)
+            let read_bytes_length = self.0.read(&mut chunk)
                 .await?;
-
-            println!("Read chunk packet: {:?}", chunk);
 
             if read_bytes_length != 0 {
                 bytes.extend_from_slice(&chunk[..read_bytes_length]);
@@ -38,12 +32,8 @@ impl TlsStreamWrapper {
 
         let bytes_length_bytes = bytes_length.to_le_bytes();
 
-        println!("Write exact initial packet: {:?}", bytes_length_bytes);
-
         self.0.write(&bytes_length_bytes)
             .await?;
-
-        println!("Write chunked packets: {:?}", bytes);
 
         self.0.write(&bytes)
             .await?;
@@ -57,6 +47,7 @@ pub struct RemoteDataStoreClient {
     server_domain: String,
     server_address: String,
     server_port: u16,
+    nonce_generator: StdRng,
 }
 
 impl RemoteDataStoreClient {
@@ -71,6 +62,7 @@ impl RemoteDataStoreClient {
             server_domain,
             server_address,
             server_port,
+            nonce_generator: StdRng::from_entropy(),
         }
     }
     async fn connect(&self) -> Result<TlsStreamWrapper, Box<dyn Error>> {
@@ -109,8 +101,6 @@ impl RemoteDataStoreClient {
         let server_response = ServerResponse::read_from_stream(&mut tls_stream_wrapper)
             .await?;
         
-        println!("Read server response: {:?}", server_response);
-
         return Ok(server_response);
     }
 }
@@ -120,10 +110,31 @@ impl DataStore for RemoteDataStoreClient {
     type Key = i64;
 
     async fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let health_check_response = self.send_request(ServerRequest::HealthCheck)
+        let request_nonce: u128 = self.nonce_generator.gen();
+        let health_check_request = ServerRequest::HealthCheck {
+            nonce: request_nonce,
+        };
+        let health_check_response = self.send_request(health_check_request.clone())
             .await?;
-        // getting back a response is good enough
-        Ok(())
+        match health_check_response {
+            ServerResponse::HealthCheck { nonce: response_nonce } => {
+                if request_nonce != response_nonce {
+                    Err(RemoteDataStoreError::NonceMismatch {
+                        response_nonce,
+                        request_nonce,
+                    }.into())
+                }
+                else {
+                    Ok(())
+                }
+            },
+            _ => {
+                Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                    request: health_check_request,
+                    response: health_check_response,
+                }.into())
+            }
+        }
     }
     async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn std::error::Error>> {
         let server_request = ServerRequest::SendBytes {
@@ -213,26 +224,24 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
         let listening_address = format!("{}:{}", self.bind_address, self.bind_port);
         let listener = TcpListener::bind(&listening_address).await?;
 
-        println!("Server listening on {listening_address}...");
-
         loop {
             let (tcp_stream, client_address) = listener.accept().await?;
             let tls_acceptor = tls_acceptor.clone();
 
+            println!("{}: received connection from {}", chrono::Utc::now(), client_address);
+
             match tls_acceptor.accept(tcp_stream).await {
                 Ok(stream) => {
-
-                    println!("Received connection on server from client.");
 
                     let mut tls_stream_wrapper = TlsStreamWrapper(TlsStream::Server(stream));
                     let server_request = ServerRequest::read_from_stream(&mut tls_stream_wrapper)
                         .await?;
 
-                    println!("Read server request on server from client: {:?}", server_request);
-
                     match server_request {
-                        ServerRequest::HealthCheck => {
-                            let server_response = ServerResponse::HealthCheck;
+                        ServerRequest::HealthCheck { nonce } => {
+                            let server_response = ServerResponse::HealthCheck {
+                                nonce,
+                            };
                             server_response.write_to_stream(&mut tls_stream_wrapper)
                                 .await?;
                         },
@@ -241,8 +250,6 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                                 .insert(bytes)
                                 .await
                                 .expect("Failed to insert into internal DataStore.");
-
-                            println!("Sending to client key {}", key);
 
                             let server_response = ServerResponse::SentBytes {
                                 id: key,
@@ -254,8 +261,6 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                             let bytes = self.data_store
                                 .get(&id)
                                 .await?;
-
-                            println!("Sending to client bytes {:?}", bytes);
 
                             let server_response = ServerResponse::ReceivedBytes {
                                 bytes,
@@ -270,8 +275,6 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                 }
             }
         }
-
-        panic!("Unexpected break from loop.");
     }
 }
 
@@ -282,7 +285,9 @@ trait StreamReaderWriter {
 
 #[derive(Clone, Debug)]
 enum ServerRequest {
-    HealthCheck,
+    HealthCheck {
+        nonce: u128,
+    },
     SendBytes {
         bytes: Vec<u8>,
     },
@@ -296,8 +301,9 @@ impl StreamReaderWriter for ServerRequest {
         let mut sending_bytes: Vec<u8> = Vec::new();
         
         match self {
-            ServerRequest::HealthCheck => {
+            ServerRequest::HealthCheck { nonce }=> {
                 sending_bytes.push(0);
+                sending_bytes.extend_from_slice(&nonce.to_le_bytes());
             },
             ServerRequest::SendBytes { bytes } => {
                 sending_bytes.push(1);
@@ -320,8 +326,6 @@ impl StreamReaderWriter for ServerRequest {
             .await?;
         let bytes_length = bytes.len();
 
-        println!("Read {} bytes from client.", bytes_length);
-
         // we are done reading, so begin parsing outcome
         let mut index = 0;
         let enum_variant_id = bytes[index];
@@ -329,6 +333,17 @@ impl StreamReaderWriter for ServerRequest {
 
         match enum_variant_id {
             0 => {
+                if index + 16 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 16,
+                    }.into());
+                }
+
+                let nonce = u128::from_le_bytes(bytes[index..index + 16].try_into()?);
+                index += 16;
+
                 if index != bytes_length {
                     return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
                         received_bytes_length: bytes_length,
@@ -337,7 +352,9 @@ impl StreamReaderWriter for ServerRequest {
                     }.into());
                 }
 
-                return Ok(ServerRequest::HealthCheck);
+                return Ok(ServerRequest::HealthCheck {
+                    nonce,
+                });
             },
             1 => {
                 if index + 4 > bytes_length {
@@ -410,7 +427,9 @@ impl StreamReaderWriter for ServerRequest {
 
 #[derive(Debug)]
 enum ServerResponse {
-    HealthCheck,
+    HealthCheck {
+        nonce: u128,
+    },
     SentBytes {
         id: i64,
     },
@@ -424,8 +443,9 @@ impl StreamReaderWriter for ServerResponse {
         let mut sending_bytes: Vec<u8> = Vec::new();
         
         match self {
-            ServerResponse::HealthCheck => {
+            ServerResponse::HealthCheck { nonce } => {
                 sending_bytes.push(0);
+                sending_bytes.extend_from_slice(&nonce.to_le_bytes());
             },
             ServerResponse::ReceivedBytes { bytes } => {
                 sending_bytes.push(1);
@@ -453,6 +473,17 @@ impl StreamReaderWriter for ServerResponse {
 
         match enum_variant_id {
             0 => {
+                if index + 16 > bytes_length {
+                    return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
+                        received_bytes_length: bytes_length,
+                        enum_variant_id,
+                        parsed_bytes_length: index + 16,
+                    }.into());
+                }
+
+                let nonce = u128::from_le_bytes(bytes[index..index + 16].try_into()?);
+                index += 16;
+
                 if index != bytes_length {
                     return Err(RemoteDataStoreError::UnexpectedNumberOfBytesParsed {
                         received_bytes_length: bytes_length,
@@ -461,7 +492,9 @@ impl StreamReaderWriter for ServerResponse {
                     }.into());
                 }
 
-                return Ok(ServerResponse::HealthCheck);
+                return Ok(ServerResponse::HealthCheck {
+                    nonce,
+                });
             },
             1 => {
                 if index + 4 > bytes_length {
@@ -548,5 +581,10 @@ enum RemoteDataStoreError {
     #[error("Unexpected enum variant byte {variant_byte}.")]
     UnexpectedEnumVariantByte {
         variant_byte: u8,
+    },
+    #[error("Unexpected response nonce {response_nonce} that failed to match request nonce {request_nonce}")]
+    NonceMismatch {
+        response_nonce: u128,
+        request_nonce: u128,
     },
 }

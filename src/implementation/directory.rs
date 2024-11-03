@@ -1,6 +1,6 @@
-use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use rand::{Rng, SeedableRng};
-use rusqlite::{named_params, params, Connection};
+use rusqlite::{named_params, Connection};
 use crate::DataStore;
 
 pub struct DirectoryDataStore {

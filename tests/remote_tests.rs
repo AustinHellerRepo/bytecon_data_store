@@ -36,7 +36,7 @@ mod remote_tests {
             .expect("Failed to write private key bytes.");
 
         println!("starting server task...");
-        let server_task = {
+        let _server_task = {
             let sqlite_file_path = sqlite_file_path.clone();
             let cache_filename_length: usize = cache_filename_length.clone();
             let server_public_key_file_path: PathBuf = server_public_key_tempfile.path().into();
@@ -80,19 +80,27 @@ mod remote_tests {
         client.initialize()
             .await
             .expect("Failed to initialize client.");
+
+        for j in 0..100 {
         
-        let id = client.insert(vec![1, 2, 3, 4])
-            .await
-            .expect("Failed to send bytes from client.");
+            let id = client.insert(vec![
+                1 + j,
+                2 + j,
+                3 + j,
+                4 + j,
+            ])
+                .await
+                .expect("Failed to send bytes from client.");
 
-        let bytes = client.get(&id)
-            .await
-            .expect("Failed to get bytes back via client.");
+            let bytes = client.get(&id)
+                .await
+                .expect("Failed to get bytes back via client.");
 
-        assert_eq!(4, bytes.len());
-        assert_eq!(1, bytes[0]);
-        assert_eq!(2, bytes[1]);
-        assert_eq!(3, bytes[2]);
-        assert_eq!(4, bytes[3]);
+            assert_eq!(4, bytes.len());
+            assert_eq!(1 + j, bytes[0]);
+            assert_eq!(2 + j, bytes[1]);
+            assert_eq!(3 + j, bytes[2]);
+            assert_eq!(4 + j, bytes[3]);
+        }
     }
 }
