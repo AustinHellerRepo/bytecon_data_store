@@ -1,7 +1,7 @@
 use std::{error::Error, path::PathBuf, sync::Arc};
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
-use tokio_rustls::{client::TlsStream, rustls::{Certificate, ClientConfig, RootCertStore, ServerName}, TlsConnector};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}};
+use tokio_rustls::{rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig, ServerName}, TlsAcceptor, TlsConnector, TlsStream};
 
 use crate::DataStore;
 
@@ -52,10 +52,16 @@ impl RemoteDataStoreClient {
         let server_name = ServerName::try_from(self.server_domain.as_str())?;
         let tls_stream = connector.connect(server_name, tcp_stream).await?;
 
-        Ok(tls_stream)
+        Ok(TlsStream::Client(tls_stream))
     }
-    fn send_request(&self, server_request: ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
-        todo!()
+    async fn send_request(&self, server_request: ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
+        let mut tls_stream = self.connect()
+            .await?;
+        server_request.write_to_stream(&mut tls_stream)
+            .await?;
+        let server_response = ServerResponse::read_from_stream(&mut tls_stream)
+            .await?;
+        return Ok(server_response);
     }
 }
 
@@ -64,7 +70,8 @@ impl DataStore for RemoteDataStoreClient {
     type Key = i64;
 
     async fn initialize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let health_check_response = self.send_request(ServerRequest::HealthCheck)?;
+        let health_check_response = self.send_request(ServerRequest::HealthCheck)
+            .await?;
         // getting back a response is good enough
         Ok(())
     }
@@ -72,7 +79,8 @@ impl DataStore for RemoteDataStoreClient {
         let server_request = ServerRequest::SendBytes {
             bytes: item,
         };
-        let server_response = self.send_request(server_request.clone())?;
+        let server_response = self.send_request(server_request.clone())
+            .await?;
         if let ServerResponse::SentBytes { id } = server_response {
             Ok(id)
         }
@@ -87,7 +95,8 @@ impl DataStore for RemoteDataStoreClient {
         let server_request = ServerRequest::GetBytes {
             id: *id,
         };
-        let server_response = self.send_request(server_request.clone())?;
+        let server_response = self.send_request(server_request.clone())
+            .await?;
         if let ServerResponse::ReceivedBytes { bytes } = server_response {
             Ok(bytes)
         }
@@ -102,16 +111,102 @@ impl DataStore for RemoteDataStoreClient {
 
 pub struct RemoteDataStoreServer<TDataStore: DataStore> {
     data_store: TDataStore,
+    public_key_file_path: PathBuf,
+    private_key_file_path: PathBuf,
     bind_address: String,
     bind_port: u16,
 }
 
-impl<TDataStore: DataStore> RemoteDataStoreServer<TDataStore> {
-    pub fn new(data_store: TDataStore, bind_address: String, bind_port: u16) -> Self {
+impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> RemoteDataStoreServer<TDataStore> {
+    pub fn new(
+        data_store: TDataStore,
+        public_key_file_path: PathBuf,
+        private_key_file_path: PathBuf,
+        bind_address: String,
+        bind_port: u16
+    ) -> Self {
         Self {
-            data_store,
+            data_store: data_store,
+            public_key_file_path,
+            private_key_file_path,
             bind_address,
             bind_port,
+        }
+    }
+    pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        // load certs
+        let certs = {
+            let cert_file = std::fs::File::open(&self.public_key_file_path)?;
+            let mut reader = std::io::BufReader::new(cert_file);
+            let certs = rustls_pemfile::certs(&mut reader)?
+                .into_iter()
+                .map(Certificate)
+                .collect();
+            certs
+        };
+
+        let key = {
+            let key_file = std::fs::File::open(&self.private_key_file_path)?;
+            let mut reader = std::io::BufReader::new(key_file);
+            let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)?;
+            PrivateKey(keys[0].clone())
+        };
+
+        // configure the TLS server
+        let tls_config = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+        let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+        // bind TCP listener
+        let listening_address = format!("{}:{}", self.bind_address, self.bind_port);
+        let listener = TcpListener::bind(&listening_address).await?;
+
+        println!("Server listening on {listening_address}...");
+
+        loop {
+            let (tcp_stream, client_address) = listener.accept().await?;
+            let tls_acceptor = tls_acceptor.clone();
+
+            match tls_acceptor.accept(tcp_stream).await {
+                Ok(stream) => {
+                    let mut tls_stream = TlsStream::Server(stream);
+                    let server_request = ServerRequest::read_from_stream(&mut tls_stream)
+                        .await?;
+                    match server_request {
+                        ServerRequest::HealthCheck => {
+                            let server_response = ServerResponse::HealthCheck;
+                            server_response.write_to_stream(&mut tls_stream)
+                                .await?;
+                        },
+                        ServerRequest::SendBytes { bytes } => {
+                            let key = self.data_store
+                                .insert(bytes)
+                                .await
+                                .expect("Failed to insert into internal DataStore.");
+                            let server_response = ServerResponse::SentBytes {
+                                id: key,
+                            };
+                            server_response.write_to_stream(&mut tls_stream)
+                                .await?;
+                        },
+                        ServerRequest::GetBytes { id } => {
+                            let bytes = self.data_store
+                                .get(&id)
+                                .await?;
+                            let server_response = ServerResponse::ReceivedBytes {
+                                bytes,
+                            };
+                            server_response.write_to_stream(&mut tls_stream)
+                                .await?;
+                        },
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to accept TLS connection: {:?}", e);
+                }
+            }
         }
     }
 }

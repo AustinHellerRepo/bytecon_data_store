@@ -1,12 +1,12 @@
 use std::{error::Error, ffi::OsString, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use rusqlite::{named_params, params, Connection};
 use crate::DataStore;
 
 pub struct DirectoryDataStore {
     sqlite_file_path: PathBuf,
     storage_directory_path: PathBuf,
-    random: rand::rngs::ThreadRng,
+    random: rand::rngs::StdRng,
     cache_filename_length: usize,
 }
 
@@ -26,7 +26,7 @@ impl DirectoryDataStore {
         Ok(Self {
             sqlite_file_path,
             storage_directory_path,
-            random: rand::thread_rng(),
+            random: rand::rngs::StdRng::from_entropy(),
             cache_filename_length,
         })
     }
@@ -317,7 +317,7 @@ trait RandomFilenameGenerator {
     fn gen_filename(&mut self, length: usize) -> String;
 }
 
-impl RandomFilenameGenerator for rand::rngs::ThreadRng {
+impl RandomFilenameGenerator for rand::rngs::StdRng {
     fn gen_filename(&mut self, length: usize) -> String {
         self.sample_iter(&rand::distributions::Alphanumeric)
             .take(length)
