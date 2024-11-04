@@ -24,9 +24,19 @@ impl DataStore for PostgresDataStore {
             &self.connection_string,
             NoTls,
         )
-            .await?;
+            .await
+            .map_err(|error| {
+                PostgresDataStoreError::FailedToConnectToPostgresDatabase {
+                    error,
+                }
+            })?;
 
-        connection.await?;
+        connection.await
+            .map_err(|error| {
+                PostgresDataStoreError::FailedToConnectToPostgresDatabase {
+                    error,
+                }
+            })?;
 
         client.execute("
             CREATE TABLE IF NOT EXISTS file_record
@@ -157,5 +167,9 @@ pub enum PostgresDataStoreError {
     #[error("Failed to find file record to delete with ID {id}")]
     FailedToDeleteFileRecord {
         id: i64,
+    },
+    #[error("Failed to connect to Postgres database with error {error}.")]
+    FailedToConnectToPostgresDatabase {
+        error: tokio_postgres::Error,
     },
 }

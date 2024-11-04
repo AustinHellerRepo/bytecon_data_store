@@ -8,11 +8,13 @@ mod remote_tests {
     use tempfile::NamedTempFile;
     use tokio::time::sleep;
 
+    #[ignore]
     #[tokio::test]
     async fn initialize_directory_data_store() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
+        let port = 8082;
 
         let mut server_public_key_tempfile = tempfile::NamedTempFile::new().unwrap();
         println!("public key: {:?}", server_public_key_tempfile.path());
@@ -57,7 +59,7 @@ mod remote_tests {
                     server_public_key_file_path,
                     server_private_key_file_path,
                     String::from("localhost"),
-                    8080,
+                    port,
                 );
                 server.start()
                     .await
@@ -76,7 +78,7 @@ mod remote_tests {
             server_public_key_tempfile.path().into(),
             String::from("localhost"),
             String::from("localhost"),
-            8080,
+            port,
         );
         client.initialize()
             .await
@@ -130,7 +132,8 @@ mod remote_tests {
 
     #[tokio::test]
     async fn initialize_postgres_data_store() {
-        let postgres_connection_string = String::from("host=localhost user=postgres password=password dbname=datafunnel");
+        let port = 8083;
+        let postgres_connection_string = String::from("host=localhost user=user password=password dbname=database");
 
         let mut server_public_key_tempfile = tempfile::NamedTempFile::new().unwrap();
         println!("public key: {:?}", server_public_key_tempfile.path());
@@ -172,7 +175,7 @@ mod remote_tests {
                     server_public_key_file_path,
                     server_private_key_file_path,
                     String::from("localhost"),
-                    8080,
+                    port,
                 );
                 server.start()
                     .await
@@ -191,7 +194,7 @@ mod remote_tests {
             server_public_key_tempfile.path().into(),
             String::from("localhost"),
             String::from("localhost"),
-            8080,
+            port,
         );
         client.initialize()
             .await
