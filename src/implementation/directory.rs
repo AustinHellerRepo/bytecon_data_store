@@ -290,6 +290,59 @@ impl DataStore for DirectoryDataStore {
 
         Ok(())
     }
+    async fn list(&self, page_index: u64, page_size: u64, row_offset: u64) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        
+        let connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let mut statement = connection.prepare("
+            SELECT
+                file_record_id
+            FROM file_record
+            ORDER BY
+                file_record_id
+            LIMIT :limit
+            OFFSET :offset;
+        ")
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToConstructStatement {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let offset = page_index * page_size + row_offset;
+        let file_record_id_results: Vec<Result<i64, rusqlite::Error>> = statement.query_map(named_params! {
+            ":limit": page_size,
+            ":offset": offset,
+        }, |row| {
+            let file_record_id: i64 = row.get(0)?;
+            Ok(file_record_id)
+        })
+            .map_err(|error| {
+                DirectoryDataStoreError::FailedToPullBackFileRecordList {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    page_size,
+                    page_index,
+                    row_offset,
+                    error,
+                }
+            })?
+            .collect();
+
+        let mut file_record_ids = Vec::with_capacity(file_record_id_results.len());
+        for file_record_id_result in file_record_id_results {
+            let file_record_id = file_record_id_result?;
+            file_record_ids.push(file_record_id);
+        }
+        
+        Ok(file_record_ids)
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -377,6 +430,14 @@ pub enum DirectoryDataStoreError {
     FailedToDeleteFileAtPath {
         file_path: PathBuf,
         error: std::io::Error,
+    },
+    #[error("Failed to pull back file_record rows from list Statement for {sqlite_file_path} for page size {page_size}, page index {page_index}, and row offset {row_offset} with error {error}.")]
+    FailedToPullBackFileRecordList {
+        sqlite_file_path: PathBuf,
+        page_size: u64,
+        page_index: u64,
+        row_offset: u64,
+        error: rusqlite::Error,
     },
 }
 

@@ -108,6 +108,16 @@ mod remote_tests {
             ids.push(id);
         }
 
+        let list = client.list(1, 4, 2)
+            .await
+            .expect("Failed to get list of IDs.");
+
+        assert_eq!(4, list.len());
+        assert_eq!(7, list[0]);
+        assert_eq!(8, list[1]);
+        assert_eq!(9, list[2]);
+        assert_eq!(10, list[3]);
+
         let mut random = rand::rngs::StdRng::from_entropy();
         ids.shuffle(&mut random);
 
