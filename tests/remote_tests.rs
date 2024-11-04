@@ -1,14 +1,13 @@
 #[cfg(test)]
 #[cfg(feature = "remote")]
 mod remote_tests {
-    use std::{io::Write, path::PathBuf, time::Duration};
+    use std::{error::Error, io::Write, path::PathBuf, sync::Arc, time::Duration};
     use data_funnel::{implementation::{directory::DirectoryDataStore, postgres::PostgresDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
     use rand::{seq::SliceRandom, SeedableRng};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use tempfile::NamedTempFile;
-    use tokio::time::sleep;
+    use tokio::{sync::Mutex, time::sleep};
 
-    #[ignore]
     #[tokio::test]
     async fn initialize_directory_data_store() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
@@ -39,31 +38,62 @@ mod remote_tests {
             .expect("Failed to write private key bytes.");
 
         println!("starting server task...");
+        let server_task_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let _server_task = {
+            let server_task_error = server_task_error.clone();
             let sqlite_file_path = sqlite_file_path.clone();
             let cache_filename_length: usize = cache_filename_length.clone();
             let server_public_key_file_path: PathBuf = server_public_key_tempfile.path().into();
             let server_private_key_file_path: PathBuf = server_private_key_tempfile.path().into();
             tokio::spawn(async move {
-                let mut directory_data_store = DirectoryDataStore::new(
-                    sqlite_file_path,
-                    cache_filename_length,
-                ).expect("Failed to create new DirectoryDataStore.");
+                'process_thread: {
+                    let data_store_result = DirectoryDataStore::new(
+                        sqlite_file_path,
+                        cache_filename_length,
+                    )
+                        .map_err(|error| {
+                            format!("Error within server task: {:?}", error)
+                        });
+                    if let Err(error) = data_store_result {
+                        *server_task_error
+                            .lock()
+                            .await = Some(error);
+                        break 'process_thread;
+                    }
+                    let mut data_store = data_store_result.unwrap();
 
-                directory_data_store.initialize()
-                    .await
-                    .expect("Failed to initialize DirectoryDataStore.");
+                    let initialization_result = data_store.initialize()
+                        .await
+                        .map_err(|error| {
+                            format!("Error within server task: {:?}", error)
+                        });
+                    if let Err(error) = initialization_result {
+                        *server_task_error
+                            .lock()
+                            .await = Some(error);
+                        break 'process_thread;
+                    }
+                    initialization_result.unwrap();
 
-                let mut server = RemoteDataStoreServer::new(
-                    directory_data_store,
-                    server_public_key_file_path,
-                    server_private_key_file_path,
-                    String::from("localhost"),
-                    port,
-                );
-                server.start()
-                    .await
-                    .expect("Failed to start server.");
+                    let mut server = RemoteDataStoreServer::new(
+                        data_store,
+                        server_public_key_file_path,
+                        server_private_key_file_path,
+                        String::from("localhost"),
+                        port,
+                    );
+                    let start_result = server.start()
+                        .await
+                        .map_err(|error| {
+                            format!("Error within server task: {:?}", error)
+                        });
+                    if let Err(error) = start_result {
+                        *server_task_error
+                            .lock()
+                            .await = Some(error);
+                        break 'process_thread;
+                    }
+                }
             })
         };
         println!("started server task");
@@ -74,7 +104,12 @@ mod remote_tests {
         sleep(Duration::from_millis(100)).await;
         println!("sleeping done");
 
-        let mut client = RemoteDataStoreClient::new(
+        if let Some(error) = server_task_error.lock().await.as_ref() {
+            eprintln!("{}", error);
+        }
+        assert!(server_task_error.lock().await.is_none());
+
+        let mut client: RemoteDataStoreClient = RemoteDataStoreClient::new(
             server_public_key_tempfile.path().into(),
             String::from("localhost"),
             String::from("localhost"),
@@ -158,28 +193,49 @@ mod remote_tests {
             .expect("Failed to write private key bytes.");
 
         println!("starting server task...");
+        let server_task_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let _server_task = {
+            let server_task_error = server_task_error.clone();
             let server_public_key_file_path: PathBuf = server_public_key_tempfile.path().into();
             let server_private_key_file_path: PathBuf = server_private_key_tempfile.path().into();
             tokio::spawn(async move {
-                let mut data_store = PostgresDataStore::new(
-                    postgres_connection_string,
-                );
+                'process_thread: {
+                    let mut data_store = PostgresDataStore::new(
+                        postgres_connection_string,
+                    );
 
-                data_store.initialize()
-                    .await
-                    .expect("Failed to initialize PostgresDataStore.");
+                    let initialization_result = data_store.initialize()
+                        .await
+                        .map_err(|error| {
+                            format!("Error within server task: {:?}", error)
+                        });
+                    if let Err(error) = initialization_result {
+                        *server_task_error
+                            .lock()
+                            .await = Some(error);
+                        break 'process_thread;
+                    }
+                    initialization_result.unwrap();
 
-                let mut server = RemoteDataStoreServer::new(
-                    data_store,
-                    server_public_key_file_path,
-                    server_private_key_file_path,
-                    String::from("localhost"),
-                    port,
-                );
-                server.start()
-                    .await
-                    .expect("Failed to start server.");
+                    let mut server = RemoteDataStoreServer::new(
+                        data_store,
+                        server_public_key_file_path,
+                        server_private_key_file_path,
+                        String::from("localhost"),
+                        port,
+                    );
+                    let start_result = server.start()
+                        .await
+                        .map_err(|error| {
+                            format!("Error within server task when trying to start: {:?}", error)
+                        });
+                    if let Err(error) = start_result {
+                        *server_task_error
+                            .lock()
+                            .await = Some(error);
+                        break 'process_thread;
+                    }
+                }
             })
         };
         println!("started server task");
@@ -187,8 +243,13 @@ mod remote_tests {
         println!("sleeping...");
 
         // wait for the server to start listening
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(10000)).await;
         println!("sleeping done");
+
+        if let Some(error) = server_task_error.lock().await.as_ref() {
+            eprintln!("{}", error);
+        }
+        assert!(server_task_error.lock().await.is_none());
 
         let mut client = RemoteDataStoreClient::new(
             server_public_key_tempfile.path().into(),

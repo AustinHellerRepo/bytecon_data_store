@@ -87,9 +87,13 @@ impl RemoteDataStoreClient {
 
         // connect to the server over TCP
         let connecting_address = format!("{}:{}", self.server_address, self.server_port);
-        let tcp_stream = TcpStream::connect(connecting_address).await?;
+        println!("RemoteDataStoreClient connecting to address {}", connecting_address);
+        let tcp_stream = TcpStream::connect(connecting_address.clone()).await?;
+        println!("RemoteDataStoreClient connected to address {}", connecting_address);
         let server_name = ServerName::try_from(self.server_domain.as_str())?;
-        let tls_stream = connector.connect(server_name, tcp_stream).await?;
+        println!("RemoteDataStoreClient connecting to TLS with server name {:?}", server_name);
+        let tls_stream = connector.connect(server_name.clone(), tcp_stream).await?;
+        println!("RemoteDataStoreClient connected to TLS with server name {:?}", server_name);
 
         Ok(TlsStreamWrapper(TlsStream::Client(tls_stream)))
     }
@@ -115,7 +119,10 @@ impl DataStore for RemoteDataStoreClient {
             nonce: request_nonce,
         };
         let health_check_response = self.send_request(health_check_request.clone())
-            .await?;
+            .await
+            .map_err(|error| {
+                format!("Error trying to send request: {:?}", error)
+            })?;
         match health_check_response {
             ServerResponse::HealthCheck { nonce: response_nonce } => {
                 if request_nonce != response_nonce {
@@ -268,6 +275,7 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
 
         // bind TCP listener
         let listening_address = format!("{}:{}", self.bind_address, self.bind_port);
+        println!("Server binding to address {}", listening_address);
         let listener = TcpListener::bind(&listening_address).await?;
 
         loop {

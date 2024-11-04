@@ -1,4 +1,5 @@
-use std::error::Error;
+use std::{error::Error, time::Duration};
+use tokio::time::sleep;
 use tokio_postgres::NoTls;
 
 use crate::DataStore;
@@ -20,6 +21,7 @@ impl DataStore for PostgresDataStore {
     type Key = i64;
 
     async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("PostgresDataStore initializing...");
         let (client, connection) = tokio_postgres::connect(
             &self.connection_string,
             NoTls,
@@ -30,13 +32,20 @@ impl DataStore for PostgresDataStore {
                     error,
                 }
             })?;
+        println!("PostgresDataStore initialized");
 
-        connection.await
-            .map_err(|error| {
-                PostgresDataStoreError::FailedToConnectToPostgresDatabase {
-                    error,
-                }
-            })?;
+        tokio::spawn(async move {
+            connection.await
+                .map_err(|error| {
+                    PostgresDataStoreError::FailedToConnectToPostgresDatabase {
+                        error,
+                    }
+                })
+                .unwrap();
+        });
+
+        sleep(Duration::from_millis(100))
+            .await;
 
         client.execute("
             CREATE TABLE IF NOT EXISTS file_record
