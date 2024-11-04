@@ -233,14 +233,14 @@ pub struct RemoteDataStoreServer<TDataStore: DataStore> {
 
 impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> RemoteDataStoreServer<TDataStore> {
     pub fn new(
-        data_store: TDataStore,
+        data_store: Arc<Mutex<TDataStore>>,
         public_key_file_path: PathBuf,
         private_key_file_path: PathBuf,
         bind_address: String,
         bind_port: u16
     ) -> Self {
         Self {
-            data_store: Arc::new(Mutex::new(data_store)),
+            data_store,
             public_key_file_path,
             private_key_file_path,
             bind_address,

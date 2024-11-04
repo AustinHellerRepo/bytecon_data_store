@@ -76,7 +76,7 @@ mod remote_tests {
                     initialization_result.unwrap();
 
                     let mut server = RemoteDataStoreServer::new(
-                        data_store,
+                        Arc::new(Mutex::new(data_store)),
                         server_public_key_file_path,
                         server_private_key_file_path,
                         String::from("localhost"),
@@ -194,17 +194,20 @@ mod remote_tests {
 
         println!("starting server task...");
         let server_task_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let data_store: Arc<Mutex<PostgresDataStore>> = Arc::new(Mutex::new(PostgresDataStore::new(
+            postgres_connection_string,
+        )));
         let _server_task = {
+            let data_store = data_store.clone();
             let server_task_error = server_task_error.clone();
             let server_public_key_file_path: PathBuf = server_public_key_tempfile.path().into();
             let server_private_key_file_path: PathBuf = server_private_key_tempfile.path().into();
             tokio::spawn(async move {
                 'process_thread: {
-                    let mut data_store = PostgresDataStore::new(
-                        postgres_connection_string,
-                    );
-
-                    let initialization_result = data_store.initialize()
+                    let initialization_result = data_store
+                        .lock()
+                        .await
+                        .initialize()
                         .await
                         .map_err(|error| {
                             format!("Error within server task: {:?}", error)
@@ -243,7 +246,7 @@ mod remote_tests {
         println!("sleeping...");
 
         // wait for the server to start listening
-        sleep(Duration::from_millis(10000)).await;
+        sleep(Duration::from_millis(100)).await;
         println!("sleeping done");
 
         if let Some(error) = server_task_error.lock().await.as_ref() {
@@ -305,5 +308,12 @@ mod remote_tests {
                 .await
                 .expect(&format!("Failed to delete ID {}", id));
         }
+
+        data_store
+            .lock()
+            .await
+            .reset()
+            .await
+            .unwrap();
     }
 }
