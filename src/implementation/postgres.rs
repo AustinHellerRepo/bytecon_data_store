@@ -1,6 +1,6 @@
 use std::{error::Error, time::Duration};
 use tokio::time::sleep;
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls};
 
 use crate::DataStore;
 
@@ -14,14 +14,7 @@ impl PostgresDataStore {
             connection_string,
         }
     }
-}
-
-impl DataStore for PostgresDataStore {
-    type Item = Vec<u8>;
-    type Key = i64;
-
-    async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
-        println!("PostgresDataStore initializing...");
+    async fn connect(&self) -> Result<Client, Box<dyn Error>> {
         let (client, connection) = tokio_postgres::connect(
             &self.connection_string,
             NoTls,
@@ -32,7 +25,6 @@ impl DataStore for PostgresDataStore {
                     error,
                 }
             })?;
-        println!("PostgresDataStore initialized");
 
         tokio::spawn(async move {
             connection.await
@@ -44,8 +36,28 @@ impl DataStore for PostgresDataStore {
                 .unwrap();
         });
 
-        sleep(Duration::from_millis(100))
-            .await;
+        Ok(client)
+    }
+    pub async fn reset(&self) -> Result<(), Box<dyn Error>> {
+        let client = self.connect()
+            .await?;
+
+        client.execute("
+            ALTER SEQUENCE file_record_file_record_id_seq RESTART WITH 1;
+        ", &[])
+            .await?;
+
+        Ok(())
+    }
+}
+
+impl DataStore for PostgresDataStore {
+    type Item = Vec<u8>;
+    type Key = i64;
+
+    async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+        let client = self.connect()
+            .await?;
 
         client.execute("
             CREATE TABLE IF NOT EXISTS file_record
@@ -59,13 +71,8 @@ impl DataStore for PostgresDataStore {
         Ok(())
     }
     async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
-        let (client, connection) = tokio_postgres::connect(
-            &self.connection_string,
-            NoTls,
-        )
+        let client = self.connect()
             .await?;
-
-        connection.await?;
 
         let row = client.query_one("
             INSERT INTO file_record
@@ -87,13 +94,8 @@ impl DataStore for PostgresDataStore {
         Ok(key)
     }
     async fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
-        let (client, connection) = tokio_postgres::connect(
-            &self.connection_string,
-            NoTls,
-        )
+        let client = self.connect()
             .await?;
-
-        connection.await?;
 
         let row = client.query_one("
             SELECT
@@ -110,13 +112,8 @@ impl DataStore for PostgresDataStore {
         Ok(bytes)
     }
     async fn delete(&self, id: &Self::Key) -> Result<(), Box<dyn Error>> {
-        let (client, connection) = tokio_postgres::connect(
-            &self.connection_string,
-            NoTls,
-        )
+        let client = self.connect()
             .await?;
-
-        connection.await?;
 
         let rows_affected_total = client.execute("
             DELETE FROM file_record
@@ -137,13 +134,8 @@ impl DataStore for PostgresDataStore {
         }
     }
     async fn list(&self, page_index: u64, page_size: u64, row_offset: u64) -> Result<Vec<Self::Key>, Box<dyn Error>> {
-        let (client, connection) = tokio_postgres::connect(
-            &self.connection_string,
-            NoTls,
-        )
+        let client = self.connect()
             .await?;
-
-        connection.await?;
 
         let offset = page_index * page_size + row_offset;
 
@@ -156,7 +148,7 @@ impl DataStore for PostgresDataStore {
             LIMIT $1
             OFFSET $2;
         ", &[
-            &(page_index as i64),
+            &(page_size as i64),
             &(offset as i64),
         ])
             .await?
