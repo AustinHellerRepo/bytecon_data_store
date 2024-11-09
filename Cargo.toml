@@ -6,11 +6,19 @@ edition = "2021"
 [features]
 default = []
 directory = ["rusqlite", "rand"]
-remote = ["tokio", "tokio-rustls", "rustls", "rustls-pemfile", "chrono"]
+remote = [
+    "tokio",
+    "tokio-rustls",
+    "rustls",
+    "rustls-pemfile",
+    "chrono",
+    "bytecon/tokio"
+]
 postgres = ["tokio", "tokio-postgres"]
 
 [dependencies]
 thiserror = { version = "1.0.66" }
+bytecon = { version = "0.1" }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 rand = { version = "0.8.5", optional = true  }
 tokio = { version = "1", features = ["full"], optional = true  }
