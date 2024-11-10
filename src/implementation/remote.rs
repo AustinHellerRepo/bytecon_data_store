@@ -98,7 +98,7 @@ impl RemoteDataStoreClient {
 
         Ok(TlsStream::Client(tls_stream))
     }
-    async fn send_request(&self, server_request: ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
+    async fn send_request(&self, server_request: &ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
         let mut tls_stream = self.connect()
             .await?;
         tls_stream.write_from_byte_converter(server_request)
@@ -119,7 +119,7 @@ impl DataStore for RemoteDataStoreClient {
         let health_check_request = ServerRequest::HealthCheck {
             nonce: request_nonce,
         };
-        let health_check_response = self.send_request(health_check_request.clone())
+        let health_check_response = self.send_request(&health_check_request)
             .await
             .map_err(|error| {
                 format!("Error trying to send request: {:?}", error)
@@ -148,7 +148,7 @@ impl DataStore for RemoteDataStoreClient {
         let server_request = ServerRequest::SendBytes {
             bytes: item,
         };
-        let server_response = self.send_request(server_request.clone())
+        let server_response = self.send_request(&server_request)
             .await?;
         if let ServerResponse::SentBytes { id } = server_response {
             Ok(id)
@@ -164,7 +164,7 @@ impl DataStore for RemoteDataStoreClient {
         let server_request = ServerRequest::GetBytes {
             id: *id,
         };
-        let server_response = self.send_request(server_request.clone())
+        let server_response = self.send_request(&server_request)
             .await?;
         if let ServerResponse::ReceivedBytes { bytes } = server_response {
             Ok(bytes)
@@ -184,7 +184,7 @@ impl DataStore for RemoteDataStoreClient {
         let server_request = ServerRequest::Delete {
             id: id,
         };
-        let server_response = self.send_request(server_request.clone())
+        let server_response = self.send_request(&server_request)
             .await?;
         if let ServerResponse::Deleted { id: response_file_record_id } = server_response {
             if id != response_file_record_id {
@@ -210,7 +210,7 @@ impl DataStore for RemoteDataStoreClient {
             page_size,
             row_offset,
         };
-        let server_response = self.send_request(server_request.clone())
+        let server_response = self.send_request(&server_request)
             .await?;
         if let ServerResponse::ReceivedIdList { ids } = server_response {
             Ok(ids)
@@ -347,7 +347,7 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
                                     }
                                 }
                             };
-                            tls_stream.write_from_byte_converter(server_response)
+                            tls_stream.write_from_byte_converter(&server_response)
                                 .await?;
                             Ok(())
                         },
