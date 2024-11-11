@@ -9,7 +9,7 @@ mod remote_tests {
     use tokio::{sync::Mutex, time::sleep};
 
     #[tokio::test]
-    async fn initialize_directory_data_store() {
+    async fn test_t9w7_initialize_directory_data_store() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
@@ -101,7 +101,7 @@ mod remote_tests {
         println!("sleeping...");
 
         // wait for the server to start listening
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(1000)).await;
         println!("sleeping done");
 
         if let Some(error) = server_task_error.lock().await.as_ref() {
@@ -115,6 +115,11 @@ mod remote_tests {
             String::from("localhost"),
             port,
         );
+
+        if _server_task.is_finished() {
+            eprintln!("Server task has already ended for some reason.");
+        }
+
         client.initialize()
             .await
             .expect("Failed to initialize client.");
@@ -166,7 +171,7 @@ mod remote_tests {
     }
 
     #[tokio::test]
-    async fn initialize_postgres_data_store() {
+    async fn test_n4c6_initialize_postgres_data_store() {
         let port = 8083;
         let postgres_connection_string = String::from("host=localhost user=user password=password dbname=database");
 
@@ -246,7 +251,7 @@ mod remote_tests {
         println!("sleeping...");
 
         // wait for the server to start listening
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(1000)).await;
         println!("sleeping done");
 
         if let Some(error) = server_task_error.lock().await.as_ref() {
@@ -260,9 +265,19 @@ mod remote_tests {
             String::from("localhost"),
             port,
         );
-        client.initialize()
-            .await
-            .expect("Failed to initialize client.");
+        match client.initialize().await {
+            Ok(_) => { },
+            Err(client_error) => {
+                if let Some(server_error) = &*server_task_error
+                    .lock()
+                    .await {
+                    
+                    eprintln!("Server error: {}", server_error);
+                }
+                eprintln!("Client error: {:?}", client_error);
+                panic!("Error encountered while initializing client.");
+            }
+        }
 
         let mut ids = Vec::new();
 

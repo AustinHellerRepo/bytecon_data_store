@@ -13,7 +13,22 @@ mod postgres_tests {
             .await
             .unwrap();
 
-        for j in 0..100 {
+        data_store.reset()
+            .await
+            .unwrap();
+
+        let empty_list = data_store.list(0, 1, 0)
+            .await
+            .unwrap();
+
+        if !empty_list.is_empty() {
+            println!("non-empty list: {:?}", empty_list);
+        }
+        assert_eq!(0, empty_list.len());
+
+        let ids_length: u8 = 100;
+        let mut ids = Vec::with_capacity(ids_length as usize);
+        for j in 0..ids_length {
             let bytes: Vec<u8> = vec![
                 1 + j,
                 2 + j,
@@ -23,6 +38,8 @@ mod postgres_tests {
             let id = data_store.insert(bytes.clone())
                 .await
                 .unwrap();
+
+            ids.push(id);
 
             let actual_bytes = data_store.get(&id)
                 .await
@@ -45,8 +62,8 @@ mod postgres_tests {
         assert_eq!(9, list[2]);
         assert_eq!(10, list[3]);
 
-        for j in 1..101 {
-            data_store.delete(&j)
+        for id in ids {
+            data_store.delete(&id)
                 .await
                 .unwrap();
         }

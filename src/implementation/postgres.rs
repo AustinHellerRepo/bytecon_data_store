@@ -43,6 +43,11 @@ impl PostgresDataStore {
             .await?;
 
         client.execute("
+            TRUNCATE TABLE file_record;
+        ", &[])
+            .await?;
+
+        client.execute("
             ALTER SEQUENCE file_record_file_record_id_seq RESTART WITH 1;
         ", &[])
             .await?;
