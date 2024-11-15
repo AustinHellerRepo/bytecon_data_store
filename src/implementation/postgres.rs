@@ -1,40 +1,31 @@
-use std::{error::Error, time::Duration};
-use tokio::time::sleep;
-use tokio_postgres::{Client, NoTls};
-
+use std::error::Error;
+use deadpool_postgres::{Client, Manager, Pool, PoolConfig};
+use tokio_postgres::{Config, NoTls};
 use crate::DataStore;
 
 pub struct PostgresDataStore {
-    connection_string: String,
+    pool: Pool<NoTls>,
 }
 
 impl PostgresDataStore {
     pub fn new(connection_string: String) -> Self {
+        let config = connection_string.as_str().parse::<Config>().expect("Failed to parse connection string into tokio-postgres Config.");
+        let manager_config = deadpool_postgres::ManagerConfig { recycling_method: deadpool_postgres::RecyclingMethod::Fast };
+        let manager = Manager::from_config(config, NoTls, manager_config);
+        let pool = Pool::from_config(manager, PoolConfig::new(100));
         Self {
-            connection_string,
+            pool,
         }
     }
-    async fn connect(&self) -> Result<Client, Box<dyn Error>> {
-        let (client, connection) = tokio_postgres::connect(
-            &self.connection_string,
-            NoTls,
-        )
+    async fn connect(&self) -> Result<Client<NoTls>, Box<dyn Error>> {
+        let client: Client<NoTls> = self.pool.get()
             .await
             .map_err(|error| {
                 PostgresDataStoreError::FailedToConnectToPostgresDatabase {
-                    error,
+                    error: Box::new(error),
                 }
-            })?;
-
-        tokio::spawn(async move {
-            connection.await
-                .map_err(|error| {
-                    PostgresDataStoreError::FailedToConnectToPostgresDatabase {
-                        error,
-                    }
-                })
-                .unwrap();
-        });
+            })
+            .unwrap();
 
         Ok(client)
     }
@@ -176,6 +167,6 @@ pub enum PostgresDataStoreError {
     },
     #[error("Failed to connect to Postgres database with error {error}.")]
     FailedToConnectToPostgresDatabase {
-        error: tokio_postgres::Error,
+        error: Box<dyn Error>,
     },
 }
