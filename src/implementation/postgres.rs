@@ -1,9 +1,11 @@
 use std::error::Error;
+use bytecon::ByteConverter;
 use deadpool_postgres::{Client, Manager, Pool, PoolConfig};
 use tokio_postgres::{Config, NoTls};
 use crate::DataStore;
 
 pub struct PostgresDataStore {
+    connection_string: String,
     pool: Pool<NoTls>,
 }
 
@@ -14,6 +16,7 @@ impl PostgresDataStore {
         let manager = Manager::from_config(config, NoTls, manager_config);
         let pool = Pool::from_config(manager, PoolConfig::new(100));
         Self {
+            connection_string,
             pool,
         }
     }
@@ -156,6 +159,16 @@ impl DataStore for PostgresDataStore {
             .collect();
             
         Ok(ids)
+    }
+}
+
+impl ByteConverter for PostgresDataStore {
+    fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+        self.connection_string.append_to_bytes(bytes)?;
+        Ok(())
+    }
+    fn extract_from_bytes(bytes: &Vec<u8>, index: &mut usize) -> Result<Self, Box<dyn Error>> where Self: Sized {
+        Ok(Self::new(String::extract_from_bytes(bytes, index)?))
     }
 }
 

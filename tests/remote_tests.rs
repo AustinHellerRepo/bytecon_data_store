@@ -5,6 +5,7 @@ mod remote_tests {
     use data_funnel::{implementation::{directory::DirectoryDataStore, postgres::PostgresDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
     use rand::{seq::SliceRandom, SeedableRng};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
+    use server_client_bytecon::{ByteConCertificate, ByteConPrivateKey, ByteConPublicKey};
     use tempfile::NamedTempFile;
     use tokio::{sync::Mutex, time::sleep};
 
@@ -77,8 +78,8 @@ mod remote_tests {
 
                     let mut server = RemoteDataStoreServer::new(
                         Arc::new(Mutex::new(data_store)),
-                        server_public_key_file_path,
-                        server_private_key_file_path,
+                        ByteConPublicKey::new(ByteConCertificate::FilePath(server_public_key_file_path)),
+                        ByteConPrivateKey::new(ByteConCertificate::FilePath(server_private_key_file_path)),
                         String::from("localhost"),
                         port,
                     );
@@ -110,7 +111,7 @@ mod remote_tests {
         assert!(server_task_error.lock().await.is_none());
 
         let mut client: RemoteDataStoreClient = RemoteDataStoreClient::new(
-            server_public_key_tempfile.path().into(),
+            ByteConPublicKey::new(ByteConCertificate::FilePath(server_public_key_tempfile.path().into())),
             String::from("localhost"),
             String::from("localhost"),
             port,
@@ -227,8 +228,8 @@ mod remote_tests {
 
                     let mut server = RemoteDataStoreServer::new(
                         data_store,
-                        server_public_key_file_path,
-                        server_private_key_file_path,
+                        ByteConPublicKey::new(ByteConCertificate::FilePath(server_public_key_file_path)),
+                        ByteConPrivateKey::new(ByteConCertificate::FilePath(server_private_key_file_path)),
                         String::from("localhost"),
                         port,
                     );
@@ -260,7 +261,7 @@ mod remote_tests {
         assert!(server_task_error.lock().await.is_none());
 
         let mut client = RemoteDataStoreClient::new(
-            server_public_key_tempfile.path().into(),
+            ByteConPublicKey::new(ByteConCertificate::FilePath(server_public_key_tempfile.path().into())),
             String::from("localhost"),
             String::from("localhost"),
             port,

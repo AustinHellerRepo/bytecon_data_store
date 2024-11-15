@@ -5,7 +5,11 @@ edition = "2021"
 
 [features]
 default = []
-directory = ["rusqlite", "rand"]
+directory = [
+    "rusqlite",
+    "rand",
+    "rand_chacha",
+]
 remote = [
     "tokio",
     "tokio-rustls",
@@ -23,9 +27,10 @@ postgres = [
 
 [dependencies]
 thiserror = { version = "1.0.66" }
-bytecon = { version = "0.1" }
+bytecon = { version = "0.1", features = ["rand"] }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 rand = { version = "0.8.5", optional = true  }
+rand_chacha = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["full"], optional = true  }
 tokio-rustls = { version = "0.23", optional = true  }
 rustls = { version = "0.21", optional = true  }

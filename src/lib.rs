@@ -2,6 +2,9 @@ use std::{error::Error, future::Future};
 
 pub mod implementation;
 
+// TODO create DistributedRemoteDataStore (server/client) for splitting out data across multiple possible data stores
+//      a strategy enum could be provide with variants like "evenly divided" (total bytes used on each is equal), "proportionally divided" (current bytes divided by max bytes is equal), "largest first", "smallest first", "fastest first", "slowest first", etc.
+
 pub trait DataStore {
     type Item;
     type Key;

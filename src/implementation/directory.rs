@@ -1,12 +1,14 @@
 use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use crate::DataStore;
+use bytecon::ByteConverter;
 use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use rusqlite::{named_params, Connection};
 
 pub struct DirectoryDataStore {
     sqlite_file_path: PathBuf,
     storage_directory_path: PathBuf,
-    random: rand::rngs::StdRng,
+    random: ChaCha8Rng,
     cache_filename_length: usize,
 }
 
@@ -26,7 +28,7 @@ impl DirectoryDataStore {
         Ok(Self {
             sqlite_file_path,
             storage_directory_path,
-            random: rand::rngs::StdRng::from_entropy(),
+            random: ChaCha8Rng::from_entropy(),
             cache_filename_length,
         })
     }
@@ -345,6 +347,24 @@ impl DataStore for DirectoryDataStore {
     }
 }
 
+impl ByteConverter for DirectoryDataStore {
+    fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+        self.sqlite_file_path.append_to_bytes(bytes)?;
+        self.storage_directory_path.append_to_bytes(bytes)?;
+        self.random.append_to_bytes(bytes)?;
+        self.cache_filename_length.append_to_bytes(bytes)?;
+        Ok(())
+    }
+    fn extract_from_bytes(bytes: &Vec<u8>, index: &mut usize) -> Result<Self, Box<dyn Error>> where Self: Sized {
+        Ok(Self {
+            sqlite_file_path: PathBuf::extract_from_bytes(bytes, index)?,
+            storage_directory_path: PathBuf::extract_from_bytes(bytes, index)?,
+            random: ChaCha8Rng::extract_from_bytes(bytes, index)?,
+            cache_filename_length: usize::extract_from_bytes(bytes, index)?,
+        })
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DirectoryDataStoreError {
     #[error("Unable to create connection to Sqlite path at {sqlite_file_path} with error {error}.")]
@@ -468,6 +488,15 @@ trait RandomFilenameGenerator {
 }
 
 impl RandomFilenameGenerator for rand::rngs::StdRng {
+    fn gen_filename(&mut self, length: usize) -> String {
+        self.sample_iter(&rand::distributions::Alphanumeric)
+            .take(length)
+            .map(char::from)
+            .collect()
+    }
+}
+
+impl RandomFilenameGenerator for ChaCha8Rng {
     fn gen_filename(&mut self, length: usize) -> String {
         self.sample_iter(&rand::distributions::Alphanumeric)
             .take(length)

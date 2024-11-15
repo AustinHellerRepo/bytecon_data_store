@@ -1,6 +1,6 @@
-use std::{error::Error, path::PathBuf, sync::Arc};
+use std::{error::Error, sync::Arc};
 use bytecon::ByteConverter;
-use server_client_bytecon::{ByteConClient, ByteConServer, MessageProcessor};
+use server_client_bytecon::{ByteConClient, ByteConPrivateKey, ByteConPublicKey, ByteConServer, MessageProcessor};
 use tokio::sync::Mutex;
 use crate::DataStore;
 
@@ -10,7 +10,7 @@ pub struct RemoteDataStoreClient {
 
 impl RemoteDataStoreClient {
     pub fn new(
-        server_public_key_file_path: PathBuf,
+        server_public_key: ByteConPublicKey,
         server_domain: String,
         server_address: String,
         server_port: u16,
@@ -19,7 +19,7 @@ impl RemoteDataStoreClient {
             client: ByteConClient::new(
                 server_address,
                 server_port,
-                server_public_key_file_path,
+                server_public_key,
                 server_domain,
             ),
         }
@@ -132,6 +132,18 @@ impl DataStore for RemoteDataStoreClient {
     }
 }
 
+impl ByteConverter for RemoteDataStoreClient {
+    fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+        self.client.append_to_bytes(bytes)?;
+        Ok(())
+    }
+    fn extract_from_bytes(bytes: &Vec<u8>, index: &mut usize) -> Result<Self, Box<dyn Error>> where Self: Sized {
+        Ok(Self {
+            client: ByteConClient::<ServerRequest, ServerResponse>::extract_from_bytes(bytes, index)?,
+        })
+    }
+}
+
 struct RemoteDataStoreMessageProcessor<TDataStore>
 where
     TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
@@ -200,6 +212,24 @@ where
     }
 }
 
+impl<TDataStore> ByteConverter for RemoteDataStoreMessageProcessor<TDataStore>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static + ByteConverter,
+{
+    fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+        self.data_store
+            .blocking_lock()
+            .append_to_bytes(bytes)?;
+        Ok(())
+    }
+    fn extract_from_bytes(bytes: &Vec<u8>, index: &mut usize) -> Result<Self, Box<dyn Error>> where Self: Sized {
+        Ok(Self {
+            data_store: Arc::new(Mutex::new(TDataStore::extract_from_bytes(bytes, index)?)),
+        })
+    }
+}
+
+
 pub struct RemoteDataStoreServer<TDataStore>
 where
     TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
@@ -207,11 +237,14 @@ where
     server: ByteConServer<RemoteDataStoreMessageProcessor<TDataStore>>,
 }
 
-impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> RemoteDataStoreServer<TDataStore> {
+impl<TDataStore> RemoteDataStoreServer<TDataStore>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
+{
     pub fn new(
         data_store: Arc<Mutex<TDataStore>>,
-        public_key_file_path: PathBuf,
-        private_key_file_path: PathBuf,
+        public_key: ByteConPublicKey,
+        private_key: ByteConPrivateKey,
         bind_address: String,
         bind_port: u16,
     ) -> Self {
@@ -219,8 +252,8 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
             server: ByteConServer::<RemoteDataStoreMessageProcessor<TDataStore>>::new(
                 bind_address,
                 bind_port,
-                public_key_file_path,
-                private_key_file_path,
+                public_key,
+                private_key,
                 Arc::new(RemoteDataStoreMessageProcessor {
                     data_store,
                 }),
@@ -230,6 +263,21 @@ impl<TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static> R
     pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
         self.server.start()
             .await
+    }
+}
+
+impl<TDataStore> ByteConverter for RemoteDataStoreServer<TDataStore>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static + ByteConverter,
+{
+    fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+        self.server.append_to_bytes(bytes)?;
+        Ok(())
+    }
+    fn extract_from_bytes(bytes: &Vec<u8>, index: &mut usize) -> Result<Self, Box<dyn Error>> where Self: Sized {
+        Ok(Self {
+            server: ByteConServer::<RemoteDataStoreMessageProcessor<TDataStore>>::extract_from_bytes(bytes, index)?,
+        })
     }
 }
 

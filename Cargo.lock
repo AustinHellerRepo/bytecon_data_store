@@ -123,11 +123,13 @@ checksum = "79296716171880943b8470b5f8d03aa55eb2e645a4874bdbb28adb49162e012c"
 
 [[package]]
 name = "bytecon"
-version = "0.1.10"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8f8c2c7a14e21b6ce018dd8eb6c40a666fec2997d276e8084e1b25c305f98ae"
+checksum = "18a8df9e29d82258e4a914d907eeaba4976c75b94a47c00846c552c4557f520d"
 dependencies = [
  "paste",
+ "rand",
+ "rand_chacha",
  "rustls 0.21.12",
  "thiserror 2.0.3",
  "tokio",
@@ -219,6 +221,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "rand",
+ "rand_chacha",
  "rcgen",
  "rusqlite",
  "rustls 0.21.12",
@@ -993,7 +996,7 @@ dependencies = [
 [[package]]
 name = "server_client_bytecon"
 version = "0.1.0"
-source = "git+ssh://git@github.com-ServerClientByteCon/AustinHellerRepo/ServerClientByteCon.git#d1446ebd4ae33be079967a4eee2340408435542e"
+source = "git+ssh://git@github.com-ServerClientByteCon/AustinHellerRepo/ServerClientByteCon.git#897f2b1e744ef5f9fd012096901007391da762ce"
 dependencies = [
  "bytecon",
  "chrono",
