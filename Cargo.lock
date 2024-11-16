@@ -220,6 +220,7 @@ dependencies = [
  "bytecon",
  "chrono",
  "deadpool-postgres",
+ "futures",
  "rand",
  "rand_chacha",
  "rcgen",

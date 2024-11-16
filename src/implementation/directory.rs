@@ -1,6 +1,7 @@
 use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
 use crate::DataStore;
 use bytecon::ByteConverter;
+use futures::future::join_all;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rusqlite::{named_params, Connection};
@@ -344,6 +345,209 @@ impl DataStore for DirectoryDataStore {
         }
         
         Ok(file_record_ids)
+    }
+    async fn bulk_insert(&mut self, items: Vec<Self::Item>) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        let mut file_paths = Vec::with_capacity(items.len());
+        for _ in 0..items.len() {
+            let random_file_name = self.random.gen_filename(self.cache_filename_length);
+            let random_file_path = self.storage_directory_path.append(random_file_name);
+
+            if random_file_path.exists() {
+                return Err(Box::new(DirectoryDataStoreError::RandomFilePathAlreadyExists {
+                    random_file_path: random_file_path.clone(),
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                }));
+            }
+
+            file_paths.push(random_file_path);
+        }
+
+        let mut files = Vec::with_capacity(file_paths.len());
+        for file_path in file_paths.iter() {
+            let mut random_file = File::create(file_path.clone())
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToCreateRandomFile {
+                        random_file_path: file_path.clone(),
+                        sqlite_file_path: self.sqlite_file_path.clone(),
+                        error,
+                    }
+                })?;
+            files.push(random_file);
+        }
+
+        let mut connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+        let transaction = connection.transaction()?;
+
+        let file_record_ids = {
+            let mut statement = transaction.prepare("
+                INSERT INTO file_record
+                (
+                    file_path,
+                    bytes_length
+                )
+                VALUES
+                (
+                    :file_path
+                    , :bytes_length
+                );
+            ")?;
+
+            let mut file_record_ids = Vec::with_capacity(file_paths.len());
+            for (file_path, item_length) in file_paths.iter().zip(items.iter().map(|item| item.len())) {
+                statement.execute(named_params! {
+                    ":file_path": file_path.as_os_str().to_str(),
+                    ":bytes_length": item_length,
+                })
+                    .map_err(|error| {
+                        DirectoryDataStoreError::FailedToInsertFileRecord {
+                            random_file_path: file_path.clone(),
+                            sqlite_file_path: self.sqlite_file_path.clone(),
+                            error,
+                        }
+                    })?;
+
+                let file_record_id = transaction.last_insert_rowid();
+                file_record_ids.push(file_record_id);
+            }
+            file_record_ids
+        };
+
+        transaction.commit()?;
+
+        for (mut file, (file_path, item)) in files.into_iter().zip(file_paths.into_iter().zip(items.into_iter())) {
+            file.write_all(&item)
+                .map_err(|error| {
+                    DirectoryDataStoreError::FailedToWriteBytesToFile {
+                        bytes_length: item.len(),
+                        random_file_path: file_path.clone(),
+                        error,
+                    }
+                })?;
+        }
+
+        Ok(file_record_ids)
+    }
+    async fn bulk_get(&self, ids: &Vec<Self::Key>) -> Result<Vec<Self::Item>, Box<dyn Error>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut connection = Connection::open(&self.sqlite_file_path)
+            .map_err(|error| {
+                DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                    sqlite_file_path: self.sqlite_file_path.clone(),
+                    error,
+                }
+            })?;
+
+        let transaction = connection.transaction()?;
+
+        // create temp table
+        let temp_table_name = {
+            let temp_table_name = {
+                let random_number: u128 = self.random.gen();
+                String::from(format!("temp_ids_{}", random_number))
+            };
+            transaction.execute(&format!("
+                CREATE TEMP TABLE {}
+                (
+                    id INTEGER
+                );
+            ", temp_table_name), [])?;
+            temp_table_name
+        };
+
+        // insert ids into temp table
+        {
+            let mut statement = transaction.prepare("
+                INSERT INTO temp_ids
+                (
+                    id
+                )
+                VALUES
+                (
+                    :id
+                );
+            ")?;
+            for id in ids {
+                statement.execute(named_params! {
+                    ":id": id,
+                })?;
+            }
+        }
+
+        // select from primary table
+        let items = {
+            let mut statement = transaction.prepare("
+                SELECT
+                    file_path
+                    , bytes_length
+                FROM file_record fr
+                JOIN temp_ids ti
+                ON
+                    ti.id = fr.id
+            ")?;
+            let items = statement.query_map([], |row| {
+                let file_path: String = row.get(0)?;
+                let bytes_length: usize = row.get(1)?;
+                Ok((
+                    file_path,
+                    bytes_length,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+            items
+        };
+
+        // drop the temp table
+        {
+            transaction.execute(&format!("
+                DROP TABLE {};
+            ", temp_table_name), [])?;
+        }
+
+        // read the bytes from the files
+        let bytes_collections = {
+            let futures = items.into_iter()
+                .map(|(file_path, bytes_length)| {
+                    async move {
+                        let mut bytes: Vec<u8> = Vec::with_capacity(bytes_length);
+                        let mut file = File::open(&file_path)
+                            .map_err(|error| {
+                                DirectoryDataStoreError::FailedToOpenCachedFileRecord {
+                                    cached_file_path: file_path.clone(),
+                                    error,
+                                }
+                            })?;
+                        file.read_to_end(&mut bytes)
+                            .map_err(|error| {
+                                DirectoryDataStoreError::FailedToReadFromCachedFile {
+                                    cached_file_path: file_path.clone(),
+                                    error,
+                                }
+                            })?;
+                        Ok(bytes)
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let joined_futures: Vec<Result<Vec<u8>, Box<dyn Error>>> = join_all(futures)
+                .await;
+            let mut bytes_collections = Vec::with_capacity(joined_futures.len());
+            for joined_future in joined_futures {
+                let bytes = joined_future?;
+                bytes_collections.push(bytes);
+            }
+            bytes_collections
+        };
+
+        Ok(bytes_collections)
     }
 }
 

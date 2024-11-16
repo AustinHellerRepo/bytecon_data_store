@@ -28,6 +28,7 @@ postgres = [
 [dependencies]
 thiserror = { version = "1.0.66" }
 bytecon = { version = "0.1", features = ["rand"] }
+futures = { version = "0.3" }
 rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
 rand = { version = "0.8.5", optional = true  }
 rand_chacha = { version = "0.3", optional = true }
