@@ -2,7 +2,7 @@
 #[cfg(feature = "remote")]
 mod remote_tests {
     use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
-    use data_funnel::{implementation::{directory::DirectoryDataStore, postgres::PostgresDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
+    use bytecon_data_store::{implementation::{directory::DirectoryDataStore, postgres::PostgresDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
     use rand::{seq::SliceRandom, SeedableRng};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
     use server_client_bytecon::{ByteConCertificate, ByteConPrivateKey, ByteConPublicKey};

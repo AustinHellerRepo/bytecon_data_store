@@ -2,7 +2,7 @@
 #[cfg(feature = "directory")]
 mod directory_tests {
     use std::path::PathBuf;
-    use data_funnel::{implementation::directory::DirectoryDataStore, DataStore};
+    use bytecon_data_store::{implementation::directory::DirectoryDataStore, DataStore};
     use rand::{seq::SliceRandom, SeedableRng};
     use tempfile::NamedTempFile;
 

@@ -137,6 +137,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytecon_data_store"
+version = "0.1.0"
+dependencies = [
+ "bytecon",
+ "chrono",
+ "cloneless_cow",
+ "deadpool-postgres",
+ "futures",
+ "rand",
+ "rand_chacha",
+ "rcgen",
+ "rusqlite",
+ "rustls 0.21.12",
+ "rustls-pemfile",
+ "server_client_bytecon",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -217,29 +240,6 @@ checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
 dependencies = [
  "generic-array",
  "typenum",
-]
-
-[[package]]
-name = "data_funnel"
-version = "0.1.0"
-dependencies = [
- "bytecon",
- "chrono",
- "cloneless_cow",
- "deadpool-postgres",
- "futures",
- "rand",
- "rand_chacha",
- "rcgen",
- "rusqlite",
- "rustls 0.21.12",
- "rustls-pemfile",
- "server_client_bytecon",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-postgres",
- "tokio-rustls",
 ]
 
 [[package]]

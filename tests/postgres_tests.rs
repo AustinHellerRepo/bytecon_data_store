@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod postgres_tests {
-    use data_funnel::{implementation::postgres::PostgresDataStore, DataStore};
+    use bytecon_data_store::{implementation::postgres::PostgresDataStore, DataStore};
 
     #[tokio::test]
     async fn test_p7a1_initialize() {
