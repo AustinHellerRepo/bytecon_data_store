@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{error::Error, fs::File, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 use crate::DataStore;
 use bytecon::ByteConverter;
 use futures::future::join_all;
@@ -9,7 +9,7 @@ use rusqlite::{named_params, Connection};
 pub struct DirectoryDataStore {
     sqlite_file_path: PathBuf,
     storage_directory_path: PathBuf,
-    random: ChaCha8Rng,
+    random: Arc<Mutex<ChaCha8Rng>>,
     cache_filename_length: usize,
 }
 
@@ -29,9 +29,27 @@ impl DirectoryDataStore {
         Ok(Self {
             sqlite_file_path,
             storage_directory_path,
-            random: ChaCha8Rng::from_entropy(),
+            random: Arc::new(Mutex::new(ChaCha8Rng::from_entropy())),
             cache_filename_length,
         })
+    }
+    fn generate_random_filename(&self) -> Result<String, Box<dyn Error>> {
+        let locked_random_result = self.random.lock();
+        let mut locked_random = locked_random_result
+            .map_err(|_| {
+                DirectoryDataStoreError::FailedToLockMutex
+            })?;
+        Ok(locked_random.gen_filename(self.cache_filename_length))
+    }
+    fn generate_random_value<T>(&self) -> Result<T, DirectoryDataStoreError>
+    where rand::distributions::Standard: rand::prelude::Distribution<T>
+    {
+        let locked_random_result = self.random.lock();
+        let mut locked_random = locked_random_result
+            .map_err(|_| {
+                DirectoryDataStoreError::FailedToLockMutex
+            })?;
+        Ok(locked_random.gen())
     }
 }
 
@@ -84,7 +102,7 @@ impl DataStore for DirectoryDataStore {
         Ok(())
     }
     async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
-        let random_file_name = self.random.gen_filename(self.cache_filename_length);
+        let random_file_name = self.generate_random_filename()?;
         let random_file_path = self.storage_directory_path.append(random_file_name);
 
         if random_file_path.exists() {
@@ -349,7 +367,7 @@ impl DataStore for DirectoryDataStore {
     async fn bulk_insert(&mut self, items: Vec<Self::Item>) -> Result<Vec<Self::Key>, Box<dyn Error>> {
         let mut file_paths = Vec::with_capacity(items.len());
         for _ in 0..items.len() {
-            let random_file_name = self.random.gen_filename(self.cache_filename_length);
+            let random_file_name = self.generate_random_filename()?;
             let random_file_path = self.storage_directory_path.append(random_file_name);
 
             if random_file_path.exists() {
@@ -438,82 +456,87 @@ impl DataStore for DirectoryDataStore {
             return Ok(Vec::new());
         }
 
-        let mut connection = Connection::open(&self.sqlite_file_path)
-            .map_err(|error| {
-                DirectoryDataStoreError::UnableToConnectToSqlitePath {
-                    sqlite_file_path: self.sqlite_file_path.clone(),
-                    error,
-                }
-            })?;
-
-        let transaction = connection.transaction()?;
-
-        // create temp table
-        let temp_table_name = {
-            let temp_table_name = {
-                let random_number: u128 = self.random.gen();
-                String::from(format!("temp_ids_{}", random_number))
-            };
-            transaction.execute(&format!("
-                CREATE TEMP TABLE {}
-                (
-                    id INTEGER
-                );
-            ", temp_table_name), [])?;
-            temp_table_name
-        };
-
-        // insert ids into temp table
-        {
-            let mut statement = transaction.prepare("
-                INSERT INTO temp_ids
-                (
-                    id
-                )
-                VALUES
-                (
-                    :id
-                );
-            ")?;
-            for id in ids {
-                statement.execute(named_params! {
-                    ":id": id,
-                })?;
-            }
-        }
-
-        // select from primary table
+        // perform database interactions
         let items = {
-            let mut statement = transaction.prepare("
-                SELECT
-                    file_path
-                    , bytes_length
-                FROM file_record fr
-                JOIN temp_ids ti
-                ON
-                    ti.id = fr.id
-            ")?;
-            let items = statement.query_map([], |row| {
-                let file_path: String = row.get(0)?;
-                let bytes_length: usize = row.get(1)?;
-                Ok((
-                    file_path,
-                    bytes_length,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+            let mut connection = Connection::open(&self.sqlite_file_path)
+                .map_err(|error| {
+                    DirectoryDataStoreError::UnableToConnectToSqlitePath {
+                        sqlite_file_path: self.sqlite_file_path.clone(),
+                        error,
+                    }
+                })?;
+
+            let transaction = connection.transaction()?;
+
+            // create temp table
+            let temp_table_name = {
+                let temp_table_name = {
+                    let random_number: u128 = self.generate_random_value()?;
+                    String::from(format!("temp_ids_{}", random_number))
+                };
+                transaction.execute(&format!("
+                    CREATE TEMP TABLE {}
+                    (
+                        id INTEGER
+                    );
+                ", temp_table_name), [])?;
+                temp_table_name
+            };
+
+            // insert ids into temp table
+            {
+                let mut statement = transaction.prepare("
+                    INSERT INTO temp_ids
+                    (
+                        id
+                    )
+                    VALUES
+                    (
+                        :id
+                    );
+                ")?;
+                for id in ids {
+                    statement.execute(named_params! {
+                        ":id": id,
+                    })?;
+                }
+            }
+
+            // select from primary table
+            let items = {
+                let mut statement = transaction.prepare("
+                    SELECT
+                        file_path
+                        , bytes_length
+                    FROM file_record fr
+                    JOIN temp_ids ti
+                    ON
+                        ti.id = fr.id
+                ")?;
+                let items = statement.query_map([], |row| {
+                    let file_path: String = row.get(0)?;
+                    let bytes_length: usize = row.get(1)?;
+                    Ok((
+                        file_path,
+                        bytes_length,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+                items
+            };
+
+            // drop the temp table
+            {
+                transaction.execute(&format!("
+                    DROP TABLE {};
+                ", temp_table_name), [])?;
+            }
+
             items
         };
 
-        // drop the temp table
-        {
-            transaction.execute(&format!("
-                DROP TABLE {};
-            ", temp_table_name), [])?;
-        }
-
         // read the bytes from the files
-        let bytes_collections = {
+        let bytes_collections: Vec<Vec<u8>> = {
             let futures = items.into_iter()
                 .map(|(file_path, bytes_length)| {
                     async move {
@@ -537,7 +560,7 @@ impl DataStore for DirectoryDataStore {
                 })
                 .collect::<Vec<_>>();
 
-            let joined_futures: Vec<Result<Vec<u8>, Box<dyn Error>>> = join_all(futures)
+            let joined_futures: Vec<Result<Vec<u8>, DirectoryDataStoreError>> = join_all(futures)
                 .await;
             let mut bytes_collections = Vec::with_capacity(joined_futures.len());
             for joined_future in joined_futures {
@@ -555,7 +578,11 @@ impl ByteConverter for DirectoryDataStore {
     fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
         self.sqlite_file_path.append_to_bytes(bytes)?;
         self.storage_directory_path.append_to_bytes(bytes)?;
-        self.random.append_to_bytes(bytes)?;
+        self.random.lock()
+            .map_err(|_| {
+                DirectoryDataStoreError::FailedToLockMutex
+            })?
+            .append_to_bytes(bytes)?;
         self.cache_filename_length.append_to_bytes(bytes)?;
         Ok(())
     }
@@ -563,9 +590,53 @@ impl ByteConverter for DirectoryDataStore {
         Ok(Self {
             sqlite_file_path: PathBuf::extract_from_bytes(bytes, index)?,
             storage_directory_path: PathBuf::extract_from_bytes(bytes, index)?,
-            random: ChaCha8Rng::extract_from_bytes(bytes, index)?,
+            random: Arc::new(Mutex::new(ChaCha8Rng::extract_from_bytes(bytes, index)?)),
             cache_filename_length: usize::extract_from_bytes(bytes, index)?,
         })
+    }
+}
+
+trait Appendable<T: AsRef<Path>> {
+    fn append(&self, appended: T) -> PathBuf;
+}
+
+impl<T: AsRef<Path>> Appendable<T> for &std::path::Path {
+    fn append(&self, appended: T) -> PathBuf {
+        self.join(appended)
+    }
+}
+
+impl<T: AsRef<Path>> Appendable<T> for PathBuf {
+    fn append(&self, appended: T) -> PathBuf {
+        self.join(appended)
+    }
+}
+
+impl<T: AsRef<Path>> Appendable<T> for &PathBuf {
+    fn append(&self, appended: T) -> PathBuf {
+        self.join(appended)
+    }
+}
+
+trait RandomFilenameGenerator {
+    fn gen_filename(&mut self, length: usize) -> String;
+}
+
+impl RandomFilenameGenerator for rand::rngs::StdRng {
+    fn gen_filename(&mut self, length: usize) -> String {
+        self.sample_iter(&rand::distributions::Alphanumeric)
+            .take(length)
+            .map(char::from)
+            .collect()
+    }
+}
+
+impl RandomFilenameGenerator for ChaCha8Rng {
+    fn gen_filename(&mut self, length: usize) -> String {
+        self.sample_iter(&rand::distributions::Alphanumeric)
+            .take(length)
+            .map(char::from)
+            .collect()
     }
 }
 
@@ -663,48 +734,6 @@ pub enum DirectoryDataStoreError {
         row_offset: u64,
         error: rusqlite::Error,
     },
-}
-
-trait Appendable<T: AsRef<Path>> {
-    fn append(&self, appended: T) -> PathBuf;
-}
-
-impl<T: AsRef<Path>> Appendable<T> for &std::path::Path {
-    fn append(&self, appended: T) -> PathBuf {
-        self.join(appended)
-    }
-}
-
-impl<T: AsRef<Path>> Appendable<T> for PathBuf {
-    fn append(&self, appended: T) -> PathBuf {
-        self.join(appended)
-    }
-}
-
-impl<T: AsRef<Path>> Appendable<T> for &PathBuf {
-    fn append(&self, appended: T) -> PathBuf {
-        self.join(appended)
-    }
-}
-
-trait RandomFilenameGenerator {
-    fn gen_filename(&mut self, length: usize) -> String;
-}
-
-impl RandomFilenameGenerator for rand::rngs::StdRng {
-    fn gen_filename(&mut self, length: usize) -> String {
-        self.sample_iter(&rand::distributions::Alphanumeric)
-            .take(length)
-            .map(char::from)
-            .collect()
-    }
-}
-
-impl RandomFilenameGenerator for ChaCha8Rng {
-    fn gen_filename(&mut self, length: usize) -> String {
-        self.sample_iter(&rand::distributions::Alphanumeric)
-            .take(length)
-            .map(char::from)
-            .collect()
-    }
+    #[error("Failed to lock mutex.")]
+    FailedToLockMutex,
 }
