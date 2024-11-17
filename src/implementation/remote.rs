@@ -1,11 +1,12 @@
 use std::{error::Error, sync::Arc};
 use bytecon::ByteConverter;
+use cloneless_cow::ClonelessCow;
 use server_client_bytecon::{ByteConClient, ByteConPrivateKey, ByteConPublicKey, ByteConServer, MessageProcessor};
 use tokio::sync::Mutex;
 use crate::DataStore;
 
 pub struct RemoteDataStoreClient {
-    client: ByteConClient<ServerRequest, ServerResponse>,
+    client: ByteConClient<ServerRequest<'static>, ServerResponse>,
 }
 
 impl RemoteDataStoreClient {
@@ -24,7 +25,7 @@ impl RemoteDataStoreClient {
             ),
         }
     }
-    async fn send_request(&self, server_request: &ServerRequest) -> Result<ServerResponse, Box<dyn Error>> {
+    async fn send_request<'a>(&self, server_request: &ServerRequest<'a>) -> Result<ServerResponse, Box<dyn Error>> {
         return Ok(self.client.send_message(server_request).await?);
     }
 }
@@ -46,8 +47,8 @@ impl DataStore for RemoteDataStoreClient {
             },
             _ => {
                 Err(RemoteDataStoreError::UnexpectedResponseForRequest {
-                    request: health_check_request,
-                    response: health_check_response,
+                    request: String::from(format!("{:?}", health_check_request)),
+                    response: String::from(format!("{:?}", health_check_response)),
                 }.into())
             }
         }
@@ -63,8 +64,8 @@ impl DataStore for RemoteDataStoreClient {
         }
         else {
             Err(RemoteDataStoreError::UnexpectedResponseForRequest {
-                response: server_response,
-                request: server_request,
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
             }.into())
         }
     }
@@ -79,8 +80,8 @@ impl DataStore for RemoteDataStoreClient {
         }
         else {
             Err(RemoteDataStoreError::UnexpectedResponseForRequest {
-                response: server_response,
-                request: server_request,
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
             }.into())
         }
     }
@@ -107,8 +108,8 @@ impl DataStore for RemoteDataStoreClient {
         }
         else {
             Err(RemoteDataStoreError::UnexpectedResponseForRequest {
-                response: server_response,
-                request: server_request,
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
             }.into())
         }
     }
@@ -125,8 +126,40 @@ impl DataStore for RemoteDataStoreClient {
         }
         else {
             Err(RemoteDataStoreError::UnexpectedResponseForRequest {
-                response: server_response,
-                request: server_request,
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
+            }.into())
+        }
+    }
+    async fn bulk_insert(&mut self, items: Vec<Self::Item>) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        let server_request = ServerRequest::BulkSendBytes {
+            bytes_collection: items,
+        };
+        let server_response = self.send_request(&server_request)
+            .await?;
+        if let ServerResponse::BulkSentBytes { ids } = server_response {
+            Ok(ids)
+        }
+        else {
+            Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
+            }.into())
+        }
+    }
+    async fn bulk_get(&self, ids: &Vec<Self::Key>) -> Result<Vec<Self::Item>, Box<dyn Error>> {
+        let server_request = ServerRequest::BulkGetBytes {
+            ids: ClonelessCow::Borrowed(ids),
+        };
+        let server_response = self.send_request(&server_request)
+            .await?;
+        if let ServerResponse::BulkReceivedBytes { bytes_collection } = server_response {
+            Ok(bytes_collection)
+        }
+        else {
+            Err(RemoteDataStoreError::UnexpectedResponseForRequest {
+                response: String::from(format!("{:?}", server_response)),
+                request: String::from(format!("{:?}", server_request)),
             }.into())
         }
     }
@@ -155,7 +188,7 @@ impl<TDataStore> MessageProcessor for RemoteDataStoreMessageProcessor<TDataStore
 where
     TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
 {
-    type TInput = ServerRequest;
+    type TInput = ServerRequest<'static>;
     type TOutput = ServerResponse;
 
     async fn process_message(&self, message: &Self::TInput) -> Result<Self::TOutput, Box<dyn Error>> {
@@ -206,7 +239,29 @@ where
                 ServerResponse::ReceivedIdList {
                     ids,
                 }
-            }
+            },
+            ServerRequest::BulkSendBytes { bytes_collection } => {
+                let ids = self.data_store
+                    .lock()
+                    .await
+                    .bulk_insert(bytes_collection.to_vec())
+                    .await?;
+
+                ServerResponse::BulkSentBytes {
+                    ids,
+                }
+            },
+            ServerRequest::BulkGetBytes { ids } => {
+                let bytes_collection = self.data_store
+                    .lock()
+                    .await
+                    .bulk_get(ids.as_ref())
+                    .await?;
+
+                ServerResponse::BulkReceivedBytes {
+                    bytes_collection,
+                }
+            },
         };
         Ok(server_response)
     }
@@ -281,8 +336,8 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-enum ServerRequest {
+#[derive(Debug)]
+enum ServerRequest<'a> {
     HealthCheck,
     SendBytes {
         bytes: Vec<u8>,
@@ -298,42 +353,60 @@ enum ServerRequest {
         page_size: u64,
         row_offset: u64,
     },
+    BulkSendBytes {
+        bytes_collection: Vec<Vec<u8>>,
+    },
+    BulkGetBytes {
+        ids: ClonelessCow<'a, Vec<i64>>,
+    },
 }
 
-impl ByteConverter for ServerRequest {
+impl ByteConverter for ServerRequest<'_> {
     fn append_to_bytes(&self, bytes: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
         match self {
             ServerRequest::HealthCheck => {
                 // byte
-                bytes.push(0);
+                0u8.append_to_bytes(bytes)?;
             },
             ServerRequest::SendBytes { bytes: send_bytes } => {
                 // byte
-                bytes.push(1);
+                1u8.append_to_bytes(bytes)?;
                 // vec<u8>
                 send_bytes.append_to_bytes(bytes)?;
             },
             ServerRequest::GetBytes { id } => {
                 // byte
-                bytes.push(2);
+                2u8.append_to_bytes(bytes)?;
                 // i64
                 id.append_to_bytes(bytes)?;
             },
             ServerRequest::Delete { id } => {
                 // byte
-                bytes.push(3);
+                3u8.append_to_bytes(bytes)?;
                 // i64
                 id.append_to_bytes(bytes)?;
             },
             ServerRequest::ListIds { page_index, page_size, row_offset } => {
                 // byte
-                bytes.push(4);
+                4u8.append_to_bytes(bytes)?;
                 // u64
                 page_index.append_to_bytes(bytes)?;
                 // u64
                 page_size.append_to_bytes(bytes)?;
                 // u64
                 row_offset.append_to_bytes(bytes)?;
+            },
+            ServerRequest::BulkSendBytes { bytes_collection } => {
+                // byte
+                5u8.append_to_bytes(bytes)?;
+                // Vec<Vec<u8>>
+                bytes_collection.append_to_bytes(bytes)?;
+            },
+            ServerRequest::BulkGetBytes { ids } => {
+                // byte
+                6u8.append_to_bytes(bytes)?;
+                // Vec<i64>
+                ids.as_ref().append_to_bytes(bytes)?;
             },
         }
         Ok(())
@@ -368,6 +441,16 @@ impl ByteConverter for ServerRequest {
                     row_offset: u64::extract_from_bytes(bytes, index)?,
                 })
             },
+            5 => {
+                Ok(Self::BulkSendBytes {
+                    bytes_collection: Vec::<Vec<u8>>::extract_from_bytes(bytes, index)?,
+                })
+            },
+            6 => {
+                Ok(Self::BulkGetBytes {
+                    ids: ClonelessCow::Owned(Vec::<i64>::extract_from_bytes(bytes, index)?),
+                })
+            },
             _ => {
                 Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
                     enum_variant_byte,
@@ -393,6 +476,12 @@ enum ServerResponse {
     ReceivedIdList {
         ids: Vec<i64>,
     },
+    BulkSentBytes {
+        ids: Vec<i64>,
+    },
+    BulkReceivedBytes {
+        bytes_collection: Vec<Vec<u8>>,
+    },
 }
 
 impl ByteConverter for ServerResponse {
@@ -400,31 +489,43 @@ impl ByteConverter for ServerResponse {
         match self {
             ServerResponse::HealthCheck => {
                 // byte
-                bytes.push(0);
+                0u8.append_to_bytes(bytes)?;
             },
             ServerResponse::ReceivedBytes { bytes: received_bytes } => {
                 // byte
-                bytes.push(1);
-                // vec<u8>
+                1u8.append_to_bytes(bytes)?;
+                // Vec<u8>
                 received_bytes.append_to_bytes(bytes)?;
             },
             ServerResponse::SentBytes { id } => {
                 // byte
-                bytes.push(2);
+                2u8.append_to_bytes(bytes)?;
                 // i64
                 id.append_to_bytes(bytes)?;
             },
             ServerResponse::Deleted { id } => {
                 // byte
-                bytes.push(3);
+                3u8.append_to_bytes(bytes)?;
                 // i64
                 id.append_to_bytes(bytes)?;
             },
             ServerResponse::ReceivedIdList { ids } => {
                 // byte
-                bytes.push(4);
-                // vec<i64>
+                4u8.append_to_bytes(bytes)?;
+                // Vec<i64>
                 ids.append_to_bytes(bytes)?;
+            },
+            ServerResponse::BulkSentBytes { ids } => {
+                // byte
+                5u8.append_to_bytes(bytes)?;
+                // Vec<i64>
+                ids.append_to_bytes(bytes)?;
+            },
+            ServerResponse::BulkReceivedBytes { bytes_collection } => {
+                // byte
+                6u8.append_to_bytes(bytes)?;
+                // Vec<Vec<u8>>
+                bytes_collection.append_to_bytes(bytes)?;
             },
         }
 
@@ -458,6 +559,16 @@ impl ByteConverter for ServerResponse {
                     ids: Vec::<i64>::extract_from_bytes(bytes, index)?,
                 })
             },
+            5 => {
+                Ok(Self::BulkSentBytes {
+                    ids: Vec::<i64>::extract_from_bytes(bytes, index)?,
+                })
+            },
+            6 => {
+                Ok(Self::BulkReceivedBytes {
+                    bytes_collection: Vec::<Vec<u8>>::extract_from_bytes(bytes, index)?,
+                })
+            },
             _ => {
                 Err(RemoteDataStoreError::UnexpectedEnumVariantByte {
                     enum_variant_byte,
@@ -470,10 +581,10 @@ impl ByteConverter for ServerResponse {
 
 #[derive(thiserror::Error, Debug)]
 enum RemoteDataStoreError {
-    #[error("Unexpected response {response:?} based on request {request:?}.")]
+    #[error("Unexpected response {response} based on request {request}.")]
     UnexpectedResponseForRequest {
-        response: ServerResponse,
-        request: ServerRequest,
+        response: String,
+        request: String,
     },
     #[error("Unexpected deleted ID mismatch from request {request_file_record_id} and response {response_file_record_id}.")]
     DeleteMismatch {

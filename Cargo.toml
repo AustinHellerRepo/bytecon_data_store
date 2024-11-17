@@ -18,6 +18,7 @@ remote = [
     "chrono",
     "bytecon/tokio",
     "server_client_bytecon",
+    "cloneless_cow",
 ]
 postgres = [
     "tokio",
@@ -42,6 +43,7 @@ chrono = { version = "0.4.38", optional = true  }
 tokio-postgres = { version = "0.7.12", optional = true }
 deadpool-postgres = { version = "0.8", optional = true }
 server_client_bytecon = { git = "ssh://git@github.com-ServerClientByteCon/AustinHellerRepo/ServerClientByteCon.git", optional = true}
+cloneless_cow = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = { version = "3.13.0" }

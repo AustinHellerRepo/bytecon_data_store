@@ -160,6 +160,87 @@ impl DataStore for PostgresDataStore {
             
         Ok(ids)
     }
+    async fn bulk_insert(&mut self, items: Vec<Self::Item>) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        let client = self.connect()
+            .await?;
+
+        let ids = client.query("
+            WITH bytes_data_set AS (
+                SELECT unnest($1::bytea[]) AS bytes
+            )
+            INSERT INTO file_record
+            (
+                bytes
+            )
+            SELECT
+                bytes
+            FROM bytes_data_set
+            RETURNING
+                file_record_id;
+        ", &[&items])
+            .await?
+            .into_iter()
+            .map(|row| {
+                row.get(0)
+            })
+            .collect::<Vec<i64>>();
+            
+        Ok(ids)
+    }
+    async fn bulk_get(&self, ids: &Vec<Self::Key>) -> Result<Vec<Self::Item>, Box<dyn Error>> {
+        let mut client = self.connect()
+            .await?;
+
+        let transaction = client.transaction()
+            .await?;
+
+        // create temp table
+        transaction.execute("
+            CREATE TEMP TABLE temp_ids
+            (
+                id BIGSERIAL PRIMARY KEY
+                , file_record_id BIGINT
+            )
+            ON COMMIT DROP;
+        ", &[])
+            .await?;
+
+        transaction.execute("
+            WITH file_record_ids AS (
+                SELECT unnest($1::bigint[]) AS file_record_id
+            )
+            INSERT INTO temp_ids
+            (
+                file_record_id
+            )
+            SELECT
+                file_record_id
+            FROM file_record_ids;
+        ", &[&ids])
+            .await?;
+
+        let bytes_collection = transaction.query("
+            SELECT
+                fr.bytes
+            FROM file_record fr
+            JOIN temp_ids ti
+            ON
+                ti.file_record_id = fr.file_record_id
+            ORDER BY
+                ti.id;
+        ", &[])
+            .await?
+            .into_iter()
+            .map(|row| {
+                row.get(0)
+            })
+            .collect::<Vec<Vec<u8>>>();
+
+        transaction.commit()
+            .await?;
+
+        Ok(bytes_collection)
+    }
 }
 
 impl ByteConverter for PostgresDataStore {

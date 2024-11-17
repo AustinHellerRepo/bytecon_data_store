@@ -69,9 +69,9 @@ impl DataStore for DirectoryDataStore {
         connection.execute("
             CREATE TABLE IF NOT EXISTS file_record
             (
-                file_record_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_path TEXT,
-                bytes_length INTEGER
+                file_record_id INTEGER PRIMARY KEY AUTOINCREMENT
+                , file_path TEXT
+                , bytes_length INTEGER
             );
         ", [])
             .map_err(|error| {
@@ -132,8 +132,8 @@ impl DataStore for DirectoryDataStore {
         connection.execute("
             INSERT INTO file_record
             (
-                file_path,
-                bytes_length
+                file_path
+                , bytes_length
             )
             VALUES
             (
@@ -382,7 +382,7 @@ impl DataStore for DirectoryDataStore {
 
         let mut files = Vec::with_capacity(file_paths.len());
         for file_path in file_paths.iter() {
-            let mut random_file = File::create(file_path.clone())
+            let random_file = File::create(file_path.clone())
                 .map_err(|error| {
                     DirectoryDataStoreError::FailedToCreateRandomFile {
                         random_file_path: file_path.clone(),
@@ -406,8 +406,8 @@ impl DataStore for DirectoryDataStore {
             let mut statement = transaction.prepare("
                 INSERT INTO file_record
                 (
-                    file_path,
-                    bytes_length
+                    file_path
+                    , bytes_length
                 )
                 VALUES
                 (
@@ -477,7 +477,8 @@ impl DataStore for DirectoryDataStore {
                 transaction.execute(&format!("
                     CREATE TEMP TABLE {}
                     (
-                        id INTEGER
+                        id INTEGER PRIMARY KEY AUTOINCREMENT
+                        , file_record_id INTEGER
                     );
                 ", temp_table_name), [])?;
                 temp_table_name
@@ -485,34 +486,36 @@ impl DataStore for DirectoryDataStore {
 
             // insert ids into temp table
             {
-                let mut statement = transaction.prepare("
-                    INSERT INTO temp_ids
+                let mut statement = transaction.prepare(&format!("
+                    INSERT INTO {}
                     (
-                        id
+                        file_record_id
                     )
                     VALUES
                     (
-                        :id
+                        :file_record_id
                     );
-                ")?;
+                ", temp_table_name))?;
                 for id in ids {
                     statement.execute(named_params! {
-                        ":id": id,
+                        ":file_record_id": id,
                     })?;
                 }
             }
 
             // select from primary table
             let items = {
-                let mut statement = transaction.prepare("
+                let mut statement = transaction.prepare(&format!("
                     SELECT
                         file_path
                         , bytes_length
                     FROM file_record fr
-                    JOIN temp_ids ti
+                    JOIN {} ti
                     ON
-                        ti.id = fr.id
-                ")?;
+                        ti.file_record_id = fr.file_record_id
+                    ORDER BY
+                        ti.id;
+                ", temp_table_name))?;
                 let items = statement.query_map([], |row| {
                     let file_path: String = row.get(0)?;
                     let bytes_length: usize = row.get(1)?;
@@ -537,8 +540,8 @@ impl DataStore for DirectoryDataStore {
 
         // read the bytes from the files
         let bytes_collections: Vec<Vec<u8>> = {
-            let futures = items.into_iter()
-                .map(|(file_path, bytes_length)| {
+            let futures = items.into_iter().enumerate()
+                .map(|(index, (file_path, bytes_length))| {
                     async move {
                         let mut bytes: Vec<u8> = Vec::with_capacity(bytes_length);
                         let mut file = File::open(&file_path)
@@ -555,19 +558,24 @@ impl DataStore for DirectoryDataStore {
                                     error,
                                 }
                             })?;
-                        Ok(bytes)
+                        Ok((index, bytes))
                     }
                 })
                 .collect::<Vec<_>>();
 
-            let joined_futures: Vec<Result<Vec<u8>, DirectoryDataStoreError>> = join_all(futures)
+            let joined_futures: Vec<Result<(usize, Vec<u8>), DirectoryDataStoreError>> = join_all(futures)
                 .await;
             let mut bytes_collections = Vec::with_capacity(joined_futures.len());
             for joined_future in joined_futures {
                 let bytes = joined_future?;
                 bytes_collections.push(bytes);
             }
-            bytes_collections
+            bytes_collections.sort_by_key(|(index, _)| *index);
+            bytes_collections.into_iter()
+                .map(|(_, bytes)| {
+                    bytes
+                })
+                .collect()
         };
 
         Ok(bytes_collections)

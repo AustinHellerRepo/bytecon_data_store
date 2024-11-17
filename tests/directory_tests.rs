@@ -7,7 +7,7 @@ mod directory_tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn initialize() {
+    fn test_k6u9_initialize() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
@@ -19,7 +19,7 @@ mod directory_tests {
     }
 
     #[tokio::test]
-    async fn initialize_and_then_initialize_instance() {
+    async fn test_w2m7_initialize_and_then_initialize_instance() {
         let sqlite_tempfile = NamedTempFile::new().unwrap();
         let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
         let cache_filename_length: usize = 10;
@@ -35,7 +35,7 @@ mod directory_tests {
     }
 
     #[tokio::test]
-    async fn store_bytes_and_retrieve_bytes_and_delete_bytes() {
+    async fn test_p4n8_store_bytes_and_retrieve_bytes_and_delete_bytes() {
 
         // initialize DirectoryDataStore
 
@@ -102,6 +102,58 @@ mod directory_tests {
             directory_data_store.delete(&id)
                 .await
                 .expect(&format!("Failed to delete for ID {}", id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_q8b2_bulk_insert_and_bulk_get() {
+        let sqlite_tempfile = NamedTempFile::new().unwrap();
+        let sqlite_file_path: PathBuf = sqlite_tempfile.path().into();
+        let cache_filename_length: usize = 10;
+        
+        let mut data_store = DirectoryDataStore::new(
+            sqlite_file_path,
+            cache_filename_length,
+        ).expect("Failed to create new DirectoryDataStore.");
+
+        data_store.initialize()
+            .await
+            .expect("Failed to initialize DirectoryDataStore.");
+
+        let original_bytes_collection = vec![
+            vec![1u8],
+            vec![2u8, 3u8],
+            vec![4u8, 5u8, 6u8],
+        ];
+        let ids = data_store.bulk_insert(original_bytes_collection.clone())
+            .await
+            .expect("Failed to perform bulk insert.");
+
+        // try in the original ID order
+        {
+            let retrieved_bytes_collection = data_store.bulk_get(&ids)
+                .await
+                .expect("Failed to bulk get by IDs.");
+
+            assert_eq!(original_bytes_collection, retrieved_bytes_collection);
+        }
+
+        // try in reverse order
+        {
+            let mut reversed_ids = Vec::with_capacity(ids.len());
+            for i in ids.len() - 1..=0 {
+                reversed_ids.push(ids[i]);
+            }
+
+            let retrieved_bytes_collection = data_store.bulk_get(&reversed_ids)
+                .await
+                .expect("Failed to bulk get by IDs.");
+
+            assert_ne!(original_bytes_collection, retrieved_bytes_collection);
+
+            for (top_down, down_up) in (ids.len() - 1..=0).zip(0..ids.len()) {
+                assert_eq!(original_bytes_collection[down_up], retrieved_bytes_collection[top_down]);
+            }
         }
     }
 }
