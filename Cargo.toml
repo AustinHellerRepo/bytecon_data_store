@@ -24,7 +24,7 @@ remote = [
     "rustls-pemfile",
     "chrono",
     "bytecon/tokio",
-    "server_client_bytecon",
+    "bytecon_tls",
     "cloneless_cow",
 ]
 postgres = [
@@ -47,7 +47,7 @@ rustls-pemfile = { version = "1.0", optional = true  }
 chrono = { version = "0.4.38", optional = true  }
 tokio-postgres = { version = "0.7.12", optional = true }
 deadpool-postgres = { version = "0.8", optional = true }
-server_client_bytecon = { git = "ssh://git@github.com-ServerClientByteCon/AustinHellerRepo/ServerClientByteCon.git", optional = true}
+bytecon_tls = { version = "0.1", optional = true}
 cloneless_cow = { version = "0.1", optional = true }
 
 [dev-dependencies]

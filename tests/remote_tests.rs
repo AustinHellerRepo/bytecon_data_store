@@ -5,7 +5,7 @@ mod remote_tests {
     use bytecon_data_store::{implementation::{directory::DirectoryDataStore, postgres::PostgresDataStore, remote::{RemoteDataStoreClient, RemoteDataStoreServer}}, DataStore};
     use rand::{seq::SliceRandom, SeedableRng};
     use rcgen::{generate_simple_self_signed, CertifiedKey};
-    use server_client_bytecon::{ByteConCertificate, ByteConPrivateKey, ByteConPublicKey};
+    use bytecon_tls::{ByteConCertificate, ByteConPrivateKey, ByteConPublicKey};
     use tempfile::NamedTempFile;
     use tokio::{sync::Mutex, time::sleep};
 

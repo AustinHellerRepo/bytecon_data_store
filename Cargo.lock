@@ -141,6 +141,7 @@ name = "bytecon_data_store"
 version = "0.1.0"
 dependencies = [
  "bytecon",
+ "bytecon_tls",
  "chrono",
  "cloneless_cow",
  "deadpool-postgres",
@@ -151,11 +152,26 @@ dependencies = [
  "rusqlite",
  "rustls 0.21.12",
  "rustls-pemfile",
- "server_client_bytecon",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "bytecon_tls"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8413b067cd3c64289109204aecdc9aab63a65917328ec8bf6c80f3d60dcc6aa"
+dependencies = [
+ "bytecon",
+ "chrono",
+ "cloneless_cow",
+ "rustls 0.21.12",
+ "rustls-pemfile",
+ "thiserror 1.0.69",
+ "tokio",
  "tokio-rustls",
 ]
 
@@ -999,21 +1015,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "server_client_bytecon"
-version = "0.1.0"
-source = "git+ssh://git@github.com-ServerClientByteCon/AustinHellerRepo/ServerClientByteCon.git#1c6f2ada67ee2bbef95fb97bd7c0eb826c4b6047"
-dependencies = [
- "bytecon",
- "chrono",
- "cloneless_cow",
- "rustls 0.21.12",
- "rustls-pemfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
