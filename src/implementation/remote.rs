@@ -672,3 +672,62 @@ enum ByteConRemoteDataStoreClientError {
     #[error("Failed to cast ByteConverter to Vec<u8>.")]
     FailedToConvertToVecBytes,
 }
+
+struct ByteConRemoteDataStoreMessageProcessor<TDataStore>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
+{
+    remote_data_store_message_processor: RemoteDataStoreMessageProcessor<TDataStore>,
+}
+
+impl<TDataStore> MessageProcessor for ByteConRemoteDataStoreMessageProcessor<TDataStore>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
+{
+    type TInput = ServerRequest<'static>;
+    type TOutput = ServerResponse;  // TODO this might need to be a ByteConverter?
+
+    async fn process_message(&self, message: &Self::TInput) -> Result<Self::TOutput, Box<dyn Error>> {
+        let response = self.remote_data_store_message_processor.process_message(message)
+            .await?
+    }
+}
+
+pub struct ByteConRemoteDataStoreServer<TDataStore, TItem>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
+    TItem: ByteConverter,
+{
+    server: RemoteDataStoreServer<TDataStore>,
+    phantom_item: PhantomData<TItem>,
+}
+
+impl<TDataStore, TItem> ByteConRemoteDataStoreServer<TDataStore, TItem>
+where
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
+    TItem: ByteConverter,
+{
+    pub fn new(
+        public_key: ByteConPublicKey,
+        private_key: ByteConPrivateKey,
+        bind_address: String,
+        bind_port: u16,
+    ) -> Self {
+        Self {
+            server: ByteConServer::<ByteConRemoteDataStoreMessageProcessor<TDataStore>>::new(
+                bind_address,
+                bind_port,
+                public_key,
+                private_key,
+                Arc::new(ByteConRemoteDataStoreMessageProcessor {
+                    data_store,
+                }),
+            ),
+            phantom_item: PhantomData::default(),
+        }
+    }
+    pub async fn start(&mut self) -> Result<(), Box<dyn Error>> {
+        self.server.start()
+            .await
+    }
+}
