@@ -284,7 +284,6 @@ where
     }
 }
 
-
 pub struct RemoteDataStoreServer<TDataStore>
 where
     TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync + 'static,
