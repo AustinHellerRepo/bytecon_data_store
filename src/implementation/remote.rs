@@ -597,17 +597,32 @@ enum RemoteDataStoreError {
     },
 }
 
-pub struct ByteConRemoteDataStoreClient<TItem>
+pub struct ByteConDataStore<TItem, TDataStore>
 where
     TItem: ByteConverter,
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64>,
 {
-    data_store: RemoteDataStoreClient,
+    data_store: TDataStore,
     phantom_item: PhantomData<TItem>,
 }
 
-impl<TItem> DataStore for ByteConRemoteDataStoreClient<TItem>
+impl<TItem, TDataStore> ByteConDataStore<TItem, TDataStore>
+where
+    TItem: ByteConverter,
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64>,
+{
+    pub fn new(data_store: TDataStore) -> Self {
+        Self {
+            data_store,
+            phantom_item: PhantomData::default(),
+        }
+    }
+}
+
+impl<TItem, TDataStore> DataStore for ByteConDataStore<TItem, TDataStore>
 where
     TItem: ByteConverter + Send + Sync,
+    TDataStore: DataStore<Item = Vec<u8>, Key = i64> + Send + Sync,
 {
     type Item = TItem;
     type Key = i64;
