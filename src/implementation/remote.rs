@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, marker::PhantomData, sync::Arc};
 use bytecon::ByteConverter;
 use cloneless_cow::ClonelessCow;
 use bytecon_tls::{ByteConClient, ByteConPrivateKey, ByteConPublicKey, ByteConServer, MessageProcessor};
@@ -595,4 +595,80 @@ enum RemoteDataStoreError {
         enum_variant_byte: u8,
         enum_variant_name: String,
     },
+}
+
+pub struct ByteConRemoteDataStoreClient<TItem>
+where
+    TItem: ByteConverter,
+{
+    data_store: RemoteDataStoreClient,
+    phantom_item: PhantomData<TItem>,
+}
+
+impl<TItem> DataStore for ByteConRemoteDataStoreClient<TItem>
+where
+    TItem: ByteConverter + Send + Sync,
+{
+    type Item = TItem;
+    type Key = i64;
+
+    async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+        self.data_store.initialize()
+            .await
+    }
+    async fn insert(&mut self, item: Self::Item) -> Result<Self::Key, Box<dyn Error>> {
+        let bytes = item.to_vec_bytes()
+            .map_err(|_| {
+                ByteConRemoteDataStoreClientError::FailedToConvertToVecBytes
+            })?;
+        self.data_store
+            .insert(bytes)
+            .await
+    }
+    async fn get(&self, id: &Self::Key) -> Result<Self::Item, Box<dyn Error>> {
+        let bytes = self.data_store.get(id)
+            .await?;
+        let mut index = 0;
+        Ok(Self::Item::extract_from_bytes(&bytes, &mut index)?)
+    }
+    async fn delete(&self, id: &Self::Key) -> Result<(), Box<dyn Error>> {
+        self.data_store.delete(id)
+            .await
+    }
+    async fn list(&self, page_index: u64, page_size: u64, row_offset: u64) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        self.data_store.list(page_index, page_size, row_offset)
+            .await
+    }
+    async fn bulk_insert(&mut self, items: Vec<Self::Item>) -> Result<Vec<Self::Key>, Box<dyn Error>> {
+        let bytes_collection = {
+            let mut bytes_collection = Vec::with_capacity(items.len());
+            for item in items {
+                let bytes = item.to_vec_bytes()?;
+                bytes_collection.push(bytes);
+            }
+            bytes_collection
+        };
+        self.data_store.bulk_insert(bytes_collection)
+            .await
+    }
+    async fn bulk_get(&self, ids: &Vec<Self::Key>) -> Result<Vec<Self::Item>, Box<dyn Error>> {
+        let bytes_collection = self.data_store.bulk_get(ids)
+            .await?;
+        let items = {
+            let mut items = Vec::with_capacity(bytes_collection.len());
+            for bytes in bytes_collection {
+                let mut index = 0;
+                let item = Self::Item::extract_from_bytes(&bytes, &mut index)?;
+                items.push(item);
+            }
+            items
+        };
+        Ok(items)
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+enum ByteConRemoteDataStoreClientError {
+    #[error("Failed to cast ByteConverter to Vec<u8>.")]
+    FailedToConvertToVecBytes,
 }
